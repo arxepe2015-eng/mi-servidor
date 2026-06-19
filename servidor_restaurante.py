@@ -73,6 +73,7 @@ def obtener_html_completo():
         .btn-pagar { background: #4caf50; color: white; border: none; padding: 12px 30px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 5px; margin-top: 10px; width: 100%; }
         .admin-section { background: #2d2d2d; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px dashed #ff9800; }
         .admin-section h3 { margin-top: 0; color: #ff9800; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .grid-formulario { display: grid; grid-template-columns: 1fr; gap: 12px; text-align: left; }
         .form-group { margin-bottom: 12px; text-align: left; }
         .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
         .form-group input { width: 100%; padding: 8px; box-sizing: border-box; background: #444; color: white; border: 1px solid #555; border-radius: 4px; }
@@ -361,8 +362,10 @@ def manejar_conexiones(conexion, direccion):
             conexion.close()
             return
 
+        # NUEVO: Ahora empaquetamos la respuesta de la CyberPi en formato Web real (HTTP)
         if "PETICION_PEDIDO" in peticion:
-            conexion.send(pedido_pendiente.encode('utf-8'))
+            respuesta_http = f"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\n\r\n{pedido_pendiente}"
+            conexion.send(respuesta_http.encode('utf-8'))
             if pedido_pendiente != "NO":
                 pedido_pendiente = "NO"
         
@@ -441,10 +444,7 @@ def manejar_conexiones(conexion, direccion):
         conexion.close()
 
 def iniciar_servidor_central():
-    # "0.0.0.0" le dice al servidor que escuche cualquier conexión en la nube
     IP_LOCAL = "0.0.0.0"
-    
-    # Render nos asigna un puerto automático. Si no lo encuentra (en tu PC), usa el 8080
     PUERTO = int(os.environ.get("PORT", 8080))
     
     servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
