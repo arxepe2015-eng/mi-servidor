@@ -126,6 +126,10 @@ HTML_LAYOUT = """
         .slider-container { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
         .slider-container input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
 
+        .member-item { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid var(--border-color); text-align: left; }
+        .member-info { display: flex; align-items: center; gap: 10px; }
+        .member-btn { background: var(--accent); border: none; color: white; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
+
         .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
         
         .sidebar { width: 350px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
@@ -200,7 +204,6 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <!-- MODAL DE ELECCIÓN: PERSONA O GRUPO -->
     <div class="modal-overlay" id="addChoiceModal" style="display:none;">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarModalChoice()">&times;</span>
@@ -210,7 +213,6 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <!-- MODAL AÑADIR PERSONA -->
     <div class="modal-overlay" id="addPersonModal" style="display:none;">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarModalPersona()">&times;</span>
@@ -220,7 +222,6 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <!-- MODAL CREAR GRUPO -->
     <div class="modal-overlay" id="addGroupModal" style="display:none;">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarModalGrupo()">&times;</span>
@@ -228,8 +229,28 @@ HTML_LAYOUT = """
             <input type="text" id="groupNameInput" placeholder="Nombre del grupo">
             <label class="file-label">Foto del grupo (Opcional):</label>
             <input type="file" id="groupFotoInput" accept="image/*">
-            <input type="text" id="groupMembersInput" placeholder="IDs de los miembros (separados por comas)">
+            <input type="text" id="groupMembersInput" placeholder="IDs de miembros (separados por comas)">
             <button type="button" class="btn-action" id="btnCrearGrupo" onclick="confirmarCrearGrupo()">Crear Grupo</button>
+        </div>
+    </div>
+
+    <!-- MODAL DE AJUSTES DEL GRUPO -->
+    <div class="modal-overlay" id="groupSettingsModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarAjustesGrupo()">&times;</span>
+            <h2>Opciones del Grupo</h2>
+            
+            <input type="text" id="editGroupName" placeholder="Nombre del grupo">
+            <label class="file-label">Cambiar foto del grupo:</label>
+            <input type="file" id="editGroupFoto" accept="image/*">
+            <button type="button" class="btn-action" onclick="guardarInfoGrupo()">Guardar Nombre/Foto</button>
+            
+            <hr style="margin: 15px 0; border-color: var(--border-color);">
+            <h3 style="font-size: 1rem; color: var(--accent); margin-bottom: 10px;">Miembros del Grupo</h3>
+            <div id="groupMembersList"></div>
+
+            <hr style="margin: 15px 0; border-color: var(--border-color);">
+            <button type="button" class="btn-action btn-danger" onclick="eliminarChat()">Salir del Grupo</button>
         </div>
     </div>
 
@@ -300,7 +321,7 @@ HTML_LAYOUT = """
                         </div>
                         <button type="button" id="btnAddContactBanner" class="add-contact-banner" style="display:none;" onclick="guardarContactoOAceptarGrupo()"></button>
                     </div>
-                    <button type="button" class="chat-menu-btn" onclick="eliminarChat()" title="Eliminar Chat / Salir del Grupo">&#8285;</button>
+                    <button type="button" class="chat-menu-btn" onclick="abrirOpcionesMenu()" title="Opciones">&#8285;</button>
                 </div>
                 
                 <div class="chat-messages-wrapper">
@@ -358,9 +379,7 @@ HTML_LAYOUT = """
             document.getElementById('toggleText').innerText = isRegister ? '¿Ya tienes cuenta? Inicia sesión' : '¿Aún no tienes cuenta? Regístrate';
         }
 
-        function limpiarErrores() {
-            document.getElementById('errorMsg').style.display = 'none';
-        }
+        function limpiarErrores() { document.getElementById('errorMsg').style.display = 'none'; }
 
         function convertAndCompressBase64(file) {
             return new Promise((resolve) => {
@@ -426,16 +445,18 @@ HTML_LAYOUT = """
                 if(isRegister) alert("¡Cuenta creada! Tu ID es: " + miUsuario.id);
                 iniciarApp();
             } else {
-                if(miUsuario && !isRegister) {
-                    socket.emit('registrar_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass, foto: miUsuario.foto });
-                } else {
-                    alert(res.mensaje);
-                    localStorage.removeItem('arxechat_sesion');
-                    document.getElementById('authModal').style.display = 'flex';
-                    document.getElementById('appContainer').style.display = 'none';
-                }
+                alert(res.mensaje);
+                localStorage.removeItem('arxechat_sesion');
+                document.getElementById('authModal').style.display = 'flex';
+                document.getElementById('appContainer').style.display = 'none';
             }
         });
+
+        function solicitarPermisoNotificaciones() {
+            if ("Notification" in window && Notification.permission === "default") {
+                Notification.requestPermission();
+            }
+        }
 
         function iniciarApp() {
             document.getElementById('authModal').style.display = 'none';
@@ -457,7 +478,8 @@ HTML_LAYOUT = """
 
             aplicarTema();
 
-            if ("Notification" in window) Notification.requestPermission();
+            // Preguntar permiso para notificaciones tras iniciar
+            solicitarPermisoNotificaciones();
             
             socket.emit('conectar_usuario', { id: miUsuario.id });
             socket.emit('obtener_contactos', { id: miUsuario.id });
@@ -468,20 +490,11 @@ HTML_LAYOUT = """
             alert("¡ID copiado al portapapeles!: " + miUsuario.id);
         }
 
-        // CONTROL DE MODALES DE AÑADIR
         function abrirModalChoice() { document.getElementById('addChoiceModal').style.display = 'flex'; }
         function cerrarModalChoice() { document.getElementById('addChoiceModal').style.display = 'none'; }
-        
-        function abrirModalPersona() {
-            cerrarModalChoice();
-            document.getElementById('addPersonModal').style.display = 'flex';
-        }
+        function abrirModalPersona() { cerrarModalChoice(); document.getElementById('addPersonModal').style.display = 'flex'; }
         function cerrarModalPersona() { document.getElementById('addPersonModal').style.display = 'none'; }
-
-        function abrirModalGrupo() {
-            cerrarModalChoice();
-            document.getElementById('addGroupModal').style.display = 'flex';
-        }
+        function abrirModalGrupo() { cerrarModalChoice(); document.getElementById('addGroupModal').style.display = 'flex'; }
         function cerrarModalGrupo() { document.getElementById('addGroupModal').style.display = 'none'; }
 
         function confirmarAgregarPersona() {
@@ -535,6 +548,71 @@ HTML_LAYOUT = """
                 socket.emit('obtener_contactos', { id: miUsuario.id });
             } else {
                 alert(res.mensaje);
+            }
+        });
+
+        function abrirOpcionesMenu() {
+            if(!contactoActivo) return;
+            if(contactoActivo.esGrupo) {
+                document.getElementById('editGroupName').value = contactoActivo.nombre;
+                socket.emit('obtener_detalles_grupo', { grupo_id: contactoActivo.id });
+                document.getElementById('groupSettingsModal').style.display = 'flex';
+            } else {
+                eliminarChat();
+            }
+        }
+
+        function cerrarAjustesGrupo() {
+            document.getElementById('groupSettingsModal').style.display = 'none';
+        }
+
+        socket.on('detalles_grupo_cargados', (data) => {
+            const container = document.getElementById('groupMembersList');
+            container.innerHTML = '';
+            data.miembros.forEach(m => {
+                const item = document.createElement('div');
+                item.className = 'member-item';
+                
+                const esYo = m.id === miUsuario.id;
+                const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}', '${m.nombre}')">Privado</button>`;
+                
+                item.innerHTML = `
+                    <div class="member-info">
+                        <strong>${m.nombre}</strong> <span style="font-size:0.8rem; color:var(--text-sub);">(ID: ${m.id})</span>
+                    </div>
+                    ${botonPrivado}
+                `;
+                container.appendChild(item);
+            });
+        });
+
+        function iniciarChatPrivado(id, nombre) {
+            cerrarAjustesGrupo();
+            socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: id });
+            seleccionarContacto({ id: id, nombre: nombre, foto: null, esGuardado: true, esGrupo: false });
+        }
+
+        async function guardarInfoGrupo() {
+            const nuevoNombre = document.getElementById('editGroupName').value.trim();
+            const fileInput = document.getElementById('editGroupFoto');
+            let nuevaFoto = null;
+
+            if(fileInput.files.length > 0) {
+                nuevaFoto = await convertAndCompressBase64(fileInput.files[0]);
+            }
+
+            socket.emit('actualizar_grupo', {
+                grupo_id: contactoActivo.id,
+                nombre: nuevoNombre,
+                foto: nuevaFoto
+            });
+        }
+
+        socket.on('grupo_actualizado', (res) => {
+            if(res.exito) {
+                alert("Grupo actualizado.");
+                cerrarAjustesGrupo();
+                socket.emit('obtener_contactos', { id: miUsuario.id });
             }
         });
 
@@ -607,7 +685,6 @@ HTML_LAYOUT = """
             if(!res.exito) {
                 alert(res.mensaje);
             } else {
-                alert("Contacto añadido correctamente.");
                 socket.emit('obtener_contactos', { id: miUsuario.id });
             }
         });
@@ -763,7 +840,7 @@ HTML_LAYOUT = """
                 renderizarMensaje(data);
             }
 
-            if (data.emisor !== miUsuario.id && document.hidden && Notification.permission === "granted") {
+            if (data.emisor !== miUsuario.id && Notification.permission === "granted") {
                 new Notification("Mensaje de " + data.nombreEmisor, { body: data.texto });
             }
         });
@@ -801,7 +878,6 @@ def conectar(data):
     from flask_socketio import join_room
     join_room(data['id'])
     
-    # Unirse a las salas de todos los grupos del usuario
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = ?", (data['id'],))
@@ -827,15 +903,9 @@ def registrar(data):
             )
         conn.commit()
         
-        nuevo_usuario = {
-            'id': nuevo_id,
-            'nombre': nombre,
-            'pass': data['pass'],
-            'foto': data.get('foto'),
-            'fondoChat': None,
-            'tema': 'dark',
-            'brilloFondo': 100
-        }
+        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (nuevo_id,))
+        nuevo_usuario = dict(cursor.fetchone())
+
         emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
 
 @socketio.on('login_usuario')
@@ -850,7 +920,7 @@ def login(data):
             usuario = dict(row)
             emit('auth_resultado', {'exito': True, 'usuario': usuario})
         else:
-            emit('auth_resultado', {'exito': False, 'mensaje': 'La cuenta no existe o la contraseña es incorrecta.'})
+            emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
 
 @socketio.on('actualizar_perfil')
 def actualizar_perfil(data):
@@ -905,6 +975,35 @@ def crear_grupo(data):
     join_room(grupo_id)
     emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
 
+@socketio.on('obtener_detalles_grupo')
+def obtener_detalles_grupo(data):
+    grupo_id = data['grupo_id']
+    miembros = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.id, u.nombre, u.foto 
+            FROM miembros_grupo mg 
+            JOIN usuarios u ON mg.usuario_id = u.id 
+            WHERE mg.grupo_id = ?
+        """, (grupo_id,))
+        miembros = [dict(r) for r in cursor.fetchall()]
+    emit('detalles_grupo_cargados', {'miembros': miembros})
+
+@socketio.on('actualizar_grupo')
+def actualizar_grupo(data):
+    grupo_id = data['grupo_id']
+    nombre = data['nombre']
+    foto = data.get('foto')
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if foto:
+            cursor.execute("UPDATE grupos SET nombre = ?, foto = ? WHERE id = ?", (nombre, foto, grupo_id))
+        else:
+            cursor.execute("UPDATE grupos SET nombre = ? WHERE id = ?", (nombre, grupo_id))
+        conn.commit()
+    emit('grupo_actualizado', {'exito': True})
+
 @socketio.on('aceptar_grupo')
 def aceptar_grupo(data):
     from flask_socketio import join_room
@@ -934,7 +1033,6 @@ def obtener_contactos(data):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # 1. Traer contactos directos
         cursor.execute("""
             SELECT u.id, u.nombre, u.foto 
             FROM contactos c 
@@ -945,7 +1043,6 @@ def obtener_contactos(data):
             lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False})
             ids_agregados.add(r['id'])
 
-        # 2. Traer chats pendientes directos
         cursor.execute("""
             SELECT DISTINCT emisor, receptor 
             FROM mensajes 
@@ -961,7 +1058,6 @@ def obtener_contactos(data):
                     lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False})
                     ids_agregados.add(u['id'])
 
-        # 3. Traer Grupos
         cursor.execute("""
             SELECT g.id, g.nombre, g.foto, mg.aceptado 
             FROM miembros_grupo mg 
