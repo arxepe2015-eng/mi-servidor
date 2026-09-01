@@ -5,7 +5,8 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+# Usamos el modo de hilos nativo de Python para máxima estabilidad en Render
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 @app.route('/')
 def home():
