@@ -7,7 +7,8 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+# Aumentamos el límite de tamaño de envío a 10MB para que el ordenador Asus no falle al subir fotos
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
 
 DB_NAME = 'arxechat.db'
 
@@ -19,7 +20,6 @@ def get_db():
 def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
-        # Tabla de usuarios
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS usuarios (
                 id TEXT PRIMARY KEY,
@@ -31,7 +31,6 @@ def init_db():
                 brilloFondo INTEGER DEFAULT 100
             )
         ''')
-        # Tabla de contactos
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS contactos (
                 mi_id TEXT,
@@ -39,7 +38,6 @@ def init_db():
                 PRIMARY KEY (mi_id, contacto_id)
             )
         ''')
-        # Tabla de mensajes
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS mensajes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +94,6 @@ HTML_LAYOUT = """
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
         body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
         
-        /* Modales */
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
         .modal-box h2 { margin-bottom: 15px; color: var(--accent); }
@@ -110,14 +107,11 @@ HTML_LAYOUT = """
         .error-msg { color: #ea4335; font-size: 0.85rem; margin-top: 5px; display: none; }
         .close-btn { position: absolute; top: 10px; right: 15px; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; }
 
-        /* Slider para brillo */
         .slider-container { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
         .slider-container input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
 
-        /* Contenedor Principal */
         .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
         
-        /* Sidebar Izquierdo */
         .sidebar { width: 350px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
         .sidebar-header { background: var(--bg-header); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
         .user-info-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; background: none; border: none; text-align: left; color: var(--text-main); }
@@ -130,12 +124,10 @@ HTML_LAYOUT = """
         .contact-name { font-weight: bold; font-size: 1rem; }
         .contact-id { font-size: 0.8rem; color: var(--text-sub); }
 
-        /* Panel Central */
         .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; }
         .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-sub); padding: 20px; }
         .empty-state h3 { color: var(--text-main); margin-bottom: 10px; font-size: 1.5rem; }
         
-        /* Chat Activo */
         .active-chat-container { flex: 1; display: none; flex-direction: column; height: 100%; position: relative; z-index: 1; }
         .chat-header { background: var(--bg-header); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); }
         .chat-header-user { display: flex; align-items: center; gap: 12px; }
@@ -164,7 +156,6 @@ HTML_LAYOUT = """
 </head>
 <body>
 
-    <!-- Modal Autenticación -->
     <div class="modal-overlay" id="authModal">
         <div class="modal-box">
             <h2 id="authTitle">Iniciar Sesión</h2>
@@ -186,7 +177,6 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <!-- Modal Ajustes de Usuario -->
     <div class="modal-overlay" id="settingsModal" style="display:none;">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
@@ -216,14 +206,12 @@ HTML_LAYOUT = """
                 <input type="range" id="editBrillo" min="10" max="100" value="100" oninput="document.getElementById('brilloVal').innerText = this.value">
             </div>
 
-            <button type="button" class="btn-action" onclick="guardarAjustes()">Guardar Cambios</button>
+            <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
         </div>
     </div>
 
-    <!-- Interfaz Principal -->
     <div class="app-container" id="appContainer">
-        <!-- Sidebar Izquierdo -->
         <div class="sidebar">
             <div class="sidebar-header">
                 <button type="button" class="user-info-btn" onclick="abrirAjustes()" title="Ajustes de Perfil">
@@ -239,7 +227,6 @@ HTML_LAYOUT = """
             <div class="contacts-list" id="contactsList"></div>
         </div>
 
-        <!-- Panel Central -->
         <div class="chat-area" id="chatArea">
             <div class="empty-state" id="emptyState">
                 <h3>Arxechat para Web</h3>
@@ -284,7 +271,6 @@ HTML_LAYOUT = """
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
             if (sesionGuardada) {
                 miUsuario = JSON.parse(sesionGuardada);
-                // Validar credenciales guardadas con servidor
                 socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
             }
         };
@@ -320,12 +306,35 @@ HTML_LAYOUT = """
             document.getElementById('errorMsg').style.display = 'none';
         }
 
-        function convertBase64(file) {
-            return new Promise((resolve, reject) => {
+        // Función para comprimir imágenes y evitar que falle en el ASUS
+        function convertAndCompressBase64(file) {
+            return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
-                reader.onload = () => resolve(reader.result);
-                reader.onerror = error => reject(error);
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.src = e.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width;
+                        let height = img.height;
+                        const maxDim = 800; // Redimensionar si es muy grande
+                        if (width > maxDim || height > maxDim) {
+                            if (width > height) {
+                                height = Math.round((height * maxDim) / width);
+                                width = maxDim;
+                            } else {
+                                width = Math.round((width * maxDim) / height);
+                                height = maxDim;
+                            }
+                        }
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.7)); // Compresión suave a JPG
+                    };
+                };
             });
         }
 
@@ -346,7 +355,7 @@ HTML_LAYOUT = """
                 let fotoBase64 = null;
                 const fileInput = document.getElementById('authFoto');
                 if(fileInput.files.length > 0) {
-                    fotoBase64 = await convertBase64(fileInput.files[0]);
+                    fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
                 }
 
                 socket.emit('registrar_usuario', { nombre, pass, foto: fotoBase64 });
@@ -359,13 +368,18 @@ HTML_LAYOUT = """
             if (res.exito) {
                 miUsuario = res.usuario;
                 localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
-                if(isRegister) alert("¡Cuenta creada! Tu ID personal es: " + miUsuario.id);
+                if(isRegister) alert("¡Cuenta creada! Tu ID es: " + miUsuario.id);
                 iniciarApp();
             } else {
-                alert(res.mensaje);
-                localStorage.removeItem('arxechat_sesion');
-                document.getElementById('authModal').style.display = 'flex';
-                document.getElementById('appContainer').style.display = 'none';
+                // Si Render reinició el servidor, auto-registramos al usuario local para recuperar su sesión sin perder nada
+                if(miUsuario && !isRegister) {
+                    socket.emit('registrar_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass, foto: miUsuario.foto });
+                } else {
+                    alert(res.mensaje);
+                    localStorage.removeItem('arxechat_sesion');
+                    document.getElementById('authModal').style.display = 'flex';
+                    document.getElementById('appContainer').style.display = 'none';
+                }
             }
         });
 
@@ -414,6 +428,10 @@ HTML_LAYOUT = """
         }
 
         async function guardarAjustes() {
+            const btn = document.getElementById('btnGuardarAjustes');
+            btn.innerText = "Guardando...";
+            btn.disabled = true;
+
             const nuevoNombre = document.getElementById('editName').value.trim();
             const nuevaPass = document.getElementById('editPass').value;
             const nuevoTema = document.getElementById('editTheme').value;
@@ -422,13 +440,13 @@ HTML_LAYOUT = """
             const fileFoto = document.getElementById('editFoto');
             let nuevaFoto = miUsuario.foto;
             if (fileFoto.files.length > 0) {
-                nuevaFoto = await convertBase64(fileFoto.files[0]);
+                nuevaFoto = await convertAndCompressBase64(fileFoto.files[0]);
             }
 
             const fileFondo = document.getElementById('editFondoChat');
             let nuevoFondo = miUsuario.fondoChat;
             if (fileFondo.files.length > 0) {
-                nuevoFondo = await convertBase64(fileFondo.files[0]);
+                nuevoFondo = await convertAndCompressBase64(fileFondo.files[0]);
             }
 
             socket.emit('actualizar_perfil', { 
@@ -443,6 +461,10 @@ HTML_LAYOUT = """
         }
 
         socket.on('perfil_actualizado', (res) => {
+            const btn = document.getElementById('btnGuardarAjustes');
+            btn.innerText = "Guardar Cambios";
+            btn.disabled = false;
+
             if(res.exito) {
                 miUsuario = res.usuario;
                 localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
@@ -625,15 +647,17 @@ def registrar(data):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (nombre,))
-        if cursor.fetchone():
-            emit('auth_resultado', {'exito': False, 'mensaje': 'El nombre de usuario ya existe.'})
-            return
-
-        nuevo_id = str(random.randint(10000000, 99999999))
-        cursor.execute(
-            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
-        )
+        row = cursor.fetchone()
+        
+        if row:
+            nuevo_id = row['id']
+            cursor.execute("UPDATE usuarios SET pass = ?, foto = ? WHERE id = ?", (data['pass'], data.get('foto'), nuevo_id))
+        else:
+            nuevo_id = str(random.randint(10000000, 99999999))
+            cursor.execute(
+                "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
+            )
         conn.commit()
         
         nuevo_usuario = {
@@ -698,7 +722,6 @@ def obtener_contactos(data):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # 1. Contactos permanentes guardados
         cursor.execute("""
             SELECT u.id, u.nombre, u.foto 
             FROM contactos c 
@@ -709,7 +732,6 @@ def obtener_contactos(data):
             lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True})
             ids_agregados.add(r['id'])
 
-        # 2. Contactos temporales/entrantes desde mensajes
         cursor.execute("""
             SELECT DISTINCT emisor, receptor 
             FROM mensajes 
