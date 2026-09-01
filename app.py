@@ -68,7 +68,6 @@ def init_db():
             )
         ''')
         
-        # Migración: Garantizar que la columna 'leido' exista en bases de datos existentes
         try:
             cursor.execute("ALTER TABLE mensajes ADD COLUMN leido INTEGER DEFAULT 0")
         except Exception:
@@ -708,7 +707,6 @@ HTML_LAYOUT = """
             const listaDiv = document.getElementById('contactsList');
             listaDiv.innerHTML = '';
             
-            // Ordenar de mayor a menor número de mensajes sin leer
             misContactos.sort((a, b) => (b.sinLeer || 0) - (a.sinLeer || 0));
 
             misContactos.forEach(c => {
