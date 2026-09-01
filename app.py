@@ -2,7 +2,7 @@ import os
 import sqlite3
 import random
 from flask import Flask, render_template_string
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
@@ -174,6 +174,12 @@ HTML_LAYOUT = """
         .chat-input-area input { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
         .chat-input-area button { background: var(--accent); border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
         
+        /* Sugerencias de autocompletado */
+        .suggestions-box { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; max-height: 140px; overflow-y: auto; margin-top: 4px; text-align: left; display: none; }
+        .suggestion-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border-color); }
+        .suggestion-item:hover { background: var(--bg-header); }
+        .suggestion-item img, .suggestion-avatar { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; background: #6b7c85; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: white; }
+
         @media (max-width: 768px) {
             .sidebar { width: 100%; }
             .chat-area { display: none; }
@@ -217,7 +223,8 @@ HTML_LAYOUT = """
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarModalPersona()">&times;</span>
             <h2>Añadir Persona</h2>
-            <input type="text" id="personIdInput" placeholder="ID de 8 dígitos de la persona">
+            <input type="text" id="personIdInput" placeholder="ID o nombre de tu contacto" oninput="filtrarSugerencias(this, 'personSuggestions')">
+            <div class="suggestions-box" id="personSuggestions"></div>
             <button type="button" class="btn-action" onclick="confirmarAgregarPersona()">Añadir Contacto</button>
         </div>
     </div>
@@ -229,8 +236,21 @@ HTML_LAYOUT = """
             <input type="text" id="groupNameInput" placeholder="Nombre del grupo">
             <label class="file-label">Foto del grupo (Opcional):</label>
             <input type="file" id="groupFotoInput" accept="image/*">
-            <input type="text" id="groupMembersInput" placeholder="IDs de miembros (separados por comas)">
+            <input type="text" id="groupMembersInput" placeholder="Añadir miembro (ID o nombre)" oninput="filtrarSugerencias(this, 'groupSuggestions')">
+            <div class="suggestions-box" id="groupSuggestions"></div>
+            <div id="selectedGroupMembers" style="text-align: left; margin-top: 5px; font-size: 0.85rem; color: var(--accent);"></div>
             <button type="button" class="btn-action" id="btnCrearGrupo" onclick="confirmarCrearGrupo()">Crear Grupo</button>
+        </div>
+    </div>
+
+    <!-- MODAL PARA AÑADIR MIEMBROS A UN GRUPO EXISTENTE -->
+    <div class="modal-overlay" id="addMemberModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarModalAddMember()">&times;</span>
+            <h2>Añadir al Grupo</h2>
+            <input type="text" id="addMemberInput" placeholder="ID o nombre de tu contacto" oninput="filtrarSugerencias(this, 'addMemberSuggestions')">
+            <div class="suggestions-box" id="addMemberSuggestions"></div>
+            <button type="button" class="btn-action" onclick="confirmarAgregarMiembro()">Añadir</button>
         </div>
     </div>
 
@@ -246,11 +266,15 @@ HTML_LAYOUT = """
             <button type="button" class="btn-action" onclick="guardarInfoGrupo()">Guardar Nombre/Foto</button>
             
             <hr style="margin: 15px 0; border-color: var(--border-color);">
-            <h3 style="font-size: 1rem; color: var(--accent); margin-bottom: 10px;">Miembros del Grupo</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="font-size: 1rem; color: var(--accent);">Miembros del Grupo</h3>
+                <button type="button" style="width: auto; padding: 6px 12px; margin: 0; font-size: 0.85rem;" onclick="abrirModalAddMember()">+ Añadir</button>
+            </div>
             <div id="groupMembersList"></div>
 
             <hr style="margin: 15px 0; border-color: var(--border-color);">
-            <button type="button" class="btn-action btn-danger" onclick="eliminarChat()">Salir del Grupo</button>
+            <button type="button" class="btn-action btn-danger" style="margin-bottom: 8px;" onclick="eliminarGrupoTotalmente()">Eliminar Grupo</button>
+            <button type="button" class="btn-action btn-danger" style="background: #a8251a !important;" onclick="eliminarChat()">Salir del Grupo</button>
         </div>
     </div>
 
@@ -343,6 +367,7 @@ HTML_LAYOUT = """
         let miUsuario = null;
         let contactoActivo = null;
         let misContactos = [];
+        let miembrosCrearGrupo = [];
 
         window.onload = () => {
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
@@ -477,8 +502,6 @@ HTML_LAYOUT = """
             }
 
             aplicarTema();
-
-            // Preguntar permiso para notificaciones tras iniciar
             solicitarPermisoNotificaciones();
             
             socket.emit('conectar_usuario', { id: miUsuario.id });
@@ -492,10 +515,73 @@ HTML_LAYOUT = """
 
         function abrirModalChoice() { document.getElementById('addChoiceModal').style.display = 'flex'; }
         function cerrarModalChoice() { document.getElementById('addChoiceModal').style.display = 'none'; }
-        function abrirModalPersona() { cerrarModalChoice(); document.getElementById('addPersonModal').style.display = 'flex'; }
+        
+        function abrirModalPersona() { 
+            cerrarModalChoice(); 
+            document.getElementById('personIdInput').value = '';
+            document.getElementById('personSuggestions').style.display = 'none';
+            document.getElementById('addPersonModal').style.display = 'flex'; 
+        }
         function cerrarModalPersona() { document.getElementById('addPersonModal').style.display = 'none'; }
-        function abrirModalGrupo() { cerrarModalChoice(); document.getElementById('addGroupModal').style.display = 'flex'; }
+        
+        function abrirModalGrupo() { 
+            cerrarModalChoice(); 
+            miembrosCrearGrupo = [];
+            document.getElementById('groupNameInput').value = '';
+            document.getElementById('groupMembersInput').value = '';
+            document.getElementById('groupSuggestions').style.display = 'none';
+            document.getElementById('selectedGroupMembers').innerText = '';
+            document.getElementById('addGroupModal').style.display = 'flex'; 
+        }
         function cerrarModalGrupo() { document.getElementById('addGroupModal').style.display = 'none'; }
+
+        function abrirModalAddMember() {
+            document.getElementById('addMemberInput').value = '';
+            document.getElementById('addMemberSuggestions').style.display = 'none';
+            document.getElementById('addMemberModal').style.display = 'flex';
+        }
+        function cerrarModalAddMember() { document.getElementById('addMemberModal').style.display = 'none'; }
+
+        /* Filtrado y sugerencias de contactos */
+        function filtrarSugerencias(inputElem, suggestionsContainerId) {
+            const query = inputElem.value.trim().toLowerCase();
+            const container = document.getElementById(suggestionsContainerId);
+            container.innerHTML = '';
+
+            if(!query) {
+                container.style.display = 'none';
+                return;
+            }
+
+            const coincidencias = misContactos.filter(c => !c.esGrupo && (c.nombre.toLowerCase().includes(query) || c.id.includes(query)));
+
+            if(coincidencias.length === 0) {
+                container.style.display = 'none';
+                return;
+            }
+
+            coincidencias.forEach(c => {
+                const div = document.createElement('div');
+                div.className = 'suggestion-item';
+                
+                const avatar = c.foto ? `<img src="${c.foto}">` : `<div class="suggestion-avatar">${c.nombre.charAt(0).toUpperCase()}</div>`;
+                div.innerHTML = `${avatar} <div><strong>${c.nombre}</strong> <br><small style="color:var(--text-sub)">${c.id}</small></div>`;
+                
+                div.onclick = () => {
+                    inputElem.value = c.id;
+                    container.style.display = 'none';
+                    if(suggestionsContainerId === 'groupSuggestions') {
+                        if(!miembrosCrearGrupo.includes(c.id)) {
+                            miembrosCrearGrupo.push(c.id);
+                            document.getElementById('selectedGroupMembers').innerText = "Añadidos: " + miembrosCrearGrupo.join(', ');
+                        }
+                        inputElem.value = '';
+                    }
+                };
+                container.appendChild(div);
+            });
+            container.style.display = 'block';
+        }
 
         function confirmarAgregarPersona() {
             const idContacto = document.getElementById('personIdInput').value.trim();
@@ -503,7 +589,6 @@ HTML_LAYOUT = """
                 if(idContacto === miUsuario.id) return alert("No puedes añadirte a ti mismo.");
                 socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: idContacto });
                 cerrarModalPersona();
-                document.getElementById('personIdInput').value = '';
             } else {
                 alert("El ID debe tener exactamente 8 dígitos.");
             }
@@ -511,9 +596,14 @@ HTML_LAYOUT = """
 
         async function confirmarCrearGrupo() {
             const nombre = document.getElementById('groupNameInput').value.trim();
-            const rawMembers = document.getElementById('groupMembersInput').value.trim();
+            const rawInput = document.getElementById('groupMembersInput').value.trim();
+            
             if(!nombre) return alert("Introduce un nombre para el grupo.");
             
+            if(rawInput && rawInput.length === 8 && !miembrosCrearGrupo.includes(rawInput)) {
+                miembrosCrearGrupo.push(rawInput);
+            }
+
             const btn = document.getElementById('btnCrearGrupo');
             btn.innerText = "Creando...";
             btn.disabled = true;
@@ -524,16 +614,34 @@ HTML_LAYOUT = """
                 fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
             }
 
-            const miembros = rawMembers.split(',').map(m => m.trim()).filter(m => m.length === 8);
-            miembros.push(miUsuario.id);
+            miembrosCrearGrupo.push(miUsuario.id);
 
             socket.emit('crear_grupo', {
                 nombre: nombre,
                 foto: fotoBase64,
                 creador_id: miUsuario.id,
-                miembros: miembros
+                miembros: miembrosCrearGrupo
             });
         }
+
+        function confirmarAgregarMiembro() {
+            const nuevoId = document.getElementById('addMemberInput').value.trim();
+            if(nuevoId && nuevoId.length === 8) {
+                socket.emit('anadir_miembro_grupo', { grupo_id: contactoActivo.id, usuario_id: nuevoId });
+                cerrarModalAddMember();
+            } else {
+                alert("El ID debe tener 8 dígitos.");
+            }
+        }
+
+        socket.on('miembro_anadido_resultado', (res) => {
+            if(res.exito) {
+                alert("Miembro añadido al grupo.");
+                socket.emit('obtener_detalles_grupo', { grupo_id: contactoActivo.id });
+            } else {
+                alert(res.mensaje);
+            }
+        });
 
         socket.on('grupo_creado_resultado', (res) => {
             const btn = document.getElementById('btnCrearGrupo');
@@ -543,8 +651,6 @@ HTML_LAYOUT = """
             if(res.exito) {
                 alert("¡Grupo creado con éxito!");
                 cerrarModalGrupo();
-                document.getElementById('groupNameInput').value = '';
-                document.getElementById('groupMembersInput').value = '';
                 socket.emit('obtener_contactos', { id: miUsuario.id });
             } else {
                 alert(res.mensaje);
@@ -773,6 +879,23 @@ HTML_LAYOUT = """
             socket.emit('obtener_contactos', { id: miUsuario.id });
         });
 
+        function eliminarGrupoTotalmente() {
+            if(contactoActivo && contactoActivo.esGrupo && confirm("¿Estás seguro de que deseas eliminar este grupo para todos los miembros? Se borra permanentemente.")) {
+                socket.emit('eliminar_grupo_completo', { grupo_id: contactoActivo.id });
+            }
+        }
+
+        socket.on('grupo_eliminado', () => {
+            cerrarAjustesGrupo();
+            document.getElementById('messages').innerHTML = '';
+            document.getElementById('activeChatContainer').style.display = 'none';
+            document.getElementById('emptyState').style.display = 'flex';
+            if(window.innerWidth <= 768) {
+                document.getElementById('chatArea').classList.remove('active-mobile');
+            }
+            socket.emit('obtener_contactos', { id: miUsuario.id });
+        });
+
         function eliminarChat() {
             if(contactoActivo && confirm(contactoActivo.esGrupo ? "¿Quieres salir de este grupo?" : "¿Quieres borrar este contacto y su conversación?")) {
                 if(contactoActivo.esGrupo) {
@@ -780,6 +903,7 @@ HTML_LAYOUT = """
                 } else {
                     socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 }
+                cerrarAjustesGrupo();
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
                 document.getElementById('emptyState').style.display = 'flex';
@@ -875,7 +999,6 @@ def home():
 
 @socketio.on('conectar_usuario')
 def conectar(data):
-    from flask_socketio import join_room
     join_room(data['id'])
     
     with get_db() as conn:
@@ -952,7 +1075,6 @@ def actualizar_perfil(data):
 
 @socketio.on('crear_grupo')
 def crear_grupo(data):
-    from flask_socketio import join_room
     grupo_id = "GRP_" + str(random.randint(10000000, 99999999))
     nombre = data['nombre']
     foto = data.get('foto')
@@ -974,6 +1096,23 @@ def crear_grupo(data):
 
     join_room(grupo_id)
     emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
+
+@socketio.on('anadir_miembro_grupo')
+def anadir_miembro_grupo(data):
+    grupo_id = data['grupo_id']
+    u_id = data['usuario_id']
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM usuarios WHERE id = ?", (u_id,))
+        if not cursor.fetchone():
+            emit('miembro_anadido_resultado', {'exito': False, 'mensaje': 'El usuario no existe.'})
+            return
+
+        cursor.execute("INSERT OR IGNORE INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (?, ?, 0)", (grupo_id, u_id))
+        conn.commit()
+
+    emit('miembro_anadido_resultado', {'exito': True})
 
 @socketio.on('obtener_detalles_grupo')
 def obtener_detalles_grupo(data):
@@ -1006,7 +1145,6 @@ def actualizar_grupo(data):
 
 @socketio.on('aceptar_grupo')
 def aceptar_grupo(data):
-    from flask_socketio import join_room
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = ? AND usuario_id = ?",
@@ -1017,12 +1155,37 @@ def aceptar_grupo(data):
 
 @socketio.on('salir_grupo')
 def salir_grupo(data):
+    grupo_id = data['grupo_id']
+    usuario_id = data['usuario_id']
+    leave_room(grupo_id)
+
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ? AND usuario_id = ?",
-                       (data['grupo_id'], data['usuario_id']))
+                       (grupo_id, usuario_id))
+        
+        cursor.execute("SELECT COUNT(*) as total FROM miembros_grupo WHERE grupo_id = ?", (grupo_id,))
+        count = cursor.fetchone()['total']
+
+        if count == 0:
+            cursor.execute("DELETE FROM grupos WHERE id = ?", (grupo_id,))
+            cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 1", (grupo_id,))
+
         conn.commit()
-    obtener_contactos({'id': data['usuario_id']})
+
+    obtener_contactos({'id': usuario_id})
+
+@socketio.on('eliminar_grupo_completo')
+def eliminar_grupo_completo(data):
+    grupo_id = data['grupo_id']
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ?", (grupo_id,))
+        cursor.execute("DELETE FROM grupos WHERE id = ?", (grupo_id,))
+        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 1", (grupo_id,))
+        conn.commit()
+
+    emit('grupo_eliminado', room=grupo_id)
 
 @socketio.on('obtener_contactos')
 def obtener_contactos(data):
