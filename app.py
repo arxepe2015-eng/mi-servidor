@@ -5,12 +5,11 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
-# Usamos el modo de hilos nativo de Python para máxima estabilidad en Render
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 @app.route('/')
 def home():
-    return "Servidor de Arxechat activo y listo para WebSockets"
+    return render_template('index.html')
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
