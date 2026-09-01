@@ -63,9 +63,17 @@ def init_db():
                 nombreEmisor TEXT,
                 fotoEmisor TEXT,
                 es_grupo INTEGER DEFAULT 0,
+                leido INTEGER DEFAULT 0,
                 fecha DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Migración: Garantizar que la columna 'leido' exista en bases de datos existentes
+        try:
+            cursor.execute("ALTER TABLE mensajes ADD COLUMN leido INTEGER DEFAULT 0")
+        except Exception:
+            pass
+            
         conn.commit()
 
 init_db()
@@ -138,11 +146,12 @@ HTML_LAYOUT = """
         .user-avatar { width: 42px; height: 42px; border-radius: 50%; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 1.2rem; color: white; object-fit: cover; flex-shrink: 0; }
         .add-btn { background: var(--accent); border: none; color: white; width: 40px; height: 40px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
         .contacts-list { flex: 1; overflow-y: auto; }
-        .contact-item { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border-color); cursor: pointer; gap: 15px; background: transparent; width: 100%; border-left: none; border-right: none; border-top: none; text-align: left; color: var(--text-main); }
+        .contact-item { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border-color); cursor: pointer; gap: 12px; background: transparent; width: 100%; border-left: none; border-right: none; border-top: none; text-align: left; color: var(--text-main); }
         .contact-item:hover, .contact-item:active { background: var(--bg-header); }
-        .contact-info { display: flex; flex-direction: column; flex: 1; }
-        .contact-name { font-weight: bold; font-size: 1rem; }
+        .contact-info { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+        .contact-name { font-weight: bold; font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .contact-id { font-size: 0.8rem; color: var(--text-sub); }
+        .unread-badge { background: var(--accent); color: white; border-radius: 50%; padding: 2px 8px; font-size: 0.75rem; font-weight: bold; margin-left: 8px; flex-shrink: 0; }
 
         .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; }
         .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-sub); padding: 20px; }
@@ -171,8 +180,10 @@ HTML_LAYOUT = """
         .message a { color: var(--link-color); text-decoration: underline; word-break: break-all; }
 
         .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
-        .chat-input-area input { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
-        .chat-input-area button { background: var(--accent); border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
+        .attach-btn { background: var(--bg-input); border: none; color: var(--text-main); width: 42px; height: 42px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; flex-shrink: 0; }
+        .attach-btn:hover { background: var(--border-color); }
+        .chat-input-area input[type="text"] { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
+        .chat-input-area button.send-btn { background: var(--accent); border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
         
         @media (max-width: 768px) {
             .sidebar { width: 100%; }
@@ -234,7 +245,6 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <!-- MODAL DE AJUSTES DEL GRUPO -->
     <div class="modal-overlay" id="groupSettingsModal" style="display:none;">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarAjustesGrupo()">&times;</span>
@@ -330,8 +340,10 @@ HTML_LAYOUT = """
                 </div>
 
                 <div class="chat-input-area">
+                    <button type="button" class="attach-btn" onclick="document.getElementById('fileAttachmentInput').click()" title="Adjuntar archivo">+</button>
+                    <input type="file" id="fileAttachmentInput" style="display:none;" onchange="manejarAdjunto(this)">
                     <input type="text" id="messageInput" placeholder="Escribe un mensaje..." autocomplete="off">
-                    <button type="button" onclick="sendMessage()">Enviar</button>
+                    <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
                 </div>
             </div>
         </div>
@@ -477,8 +489,6 @@ HTML_LAYOUT = """
             }
 
             aplicarTema();
-
-            // Preguntar permiso para notificaciones tras iniciar
             solicitarPermisoNotificaciones();
             
             socket.emit('conectar_usuario', { id: miUsuario.id });
@@ -589,7 +599,7 @@ HTML_LAYOUT = """
         function iniciarChatPrivado(id, nombre) {
             cerrarAjustesGrupo();
             socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: id });
-            seleccionarContacto({ id: id, nombre: nombre, foto: null, esGuardado: true, esGrupo: false });
+            seleccionarContacto({ id: id, nombre: nombre, foto: null, esGuardado: true, esGrupo: false, sinLeer: 0 });
         }
 
         async function guardarInfoGrupo() {
@@ -697,6 +707,10 @@ HTML_LAYOUT = """
         function renderizarContactos() {
             const listaDiv = document.getElementById('contactsList');
             listaDiv.innerHTML = '';
+            
+            // Ordenar de mayor a menor número de mensajes sin leer
+            misContactos.sort((a, b) => (b.sinLeer || 0) - (a.sinLeer || 0));
+
             misContactos.forEach(c => {
                 const btn = document.createElement('button');
                 btn.type = 'button';
@@ -712,12 +726,15 @@ HTML_LAYOUT = """
                     etiqueta = c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>';
                 }
 
+                const badgeHtml = (c.sinLeer && c.sinLeer > 0) ? `<span class="unread-badge">${c.sinLeer}</span>` : '';
+
                 btn.innerHTML = `
                     ${avatarHtml}
                     <div class="contact-info">
                         <div class="contact-name">${c.nombre} ${etiqueta}</div>
                         <div class="contact-id">${c.esGrupo ? 'Grupo' : 'ID: ' + c.id}</div>
                     </div>
+                    ${badgeHtml}
                 `;
                 listaDiv.appendChild(btn);
             });
@@ -725,6 +742,9 @@ HTML_LAYOUT = """
 
         function seleccionarContacto(c) {
             contactoActivo = c;
+            c.sinLeer = 0;
+            renderizarContactos();
+
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('activeChatContainer').style.display = 'flex';
             document.getElementById('activeName').innerText = c.nombre;
@@ -790,6 +810,9 @@ HTML_LAYOUT = """
         }
 
         function formatearTextoConLinks(texto) {
+            if (texto.startsWith('<img') || texto.startsWith('📁 <a')) {
+                return texto;
+            }
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             return texto.replace(urlRegex, function(url) {
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
@@ -834,14 +857,25 @@ HTML_LAYOUT = """
         });
 
         socket.on('recibir_mensaje', (data) => {
-            socket.emit('obtener_contactos', { id: miUsuario.id });
+            const esDelChatActivo = contactoActivo && (
+                (contactoActivo.esGrupo && data.receptor === contactoActivo.id) ||
+                (!contactoActivo.esGrupo && (data.emisor === contactoActivo.id || (data.emisor === miUsuario.id && data.receptor === contactoActivo.id)))
+            );
 
-            if(contactoActivo && (data.clave_chat === contactoActivo.id || data.emisor === contactoActivo.id || data.receptor === miUsuario.id)) {
+            if (esDelChatActivo) {
                 renderizarMensaje(data);
+                if (data.emisor !== miUsuario.id) {
+                    socket.emit('marcar_leido', { emisor: miUsuario.id, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo });
+                }
+            } else {
+                socket.emit('obtener_contactos', { id: miUsuario.id });
             }
 
             if (data.emisor !== miUsuario.id && Notification.permission === "granted") {
-                new Notification("Mensaje de " + data.nombreEmisor, { body: data.texto });
+                let prevText = data.texto;
+                if(prevText.startsWith('<img')) prevText = '📷 Foto adjunta';
+                else if(prevText.startsWith('📁 <a')) prevText = '📁 Archivo adjunto';
+                new Notification("Mensaje de " + data.nombreEmisor, { body: prevText });
             }
         });
 
@@ -858,6 +892,50 @@ HTML_LAYOUT = """
                     texto: texto
                 });
                 input.value = '';
+            }
+        }
+
+        async function manejarAdjunto(input) {
+            if (!input.files || input.files.length === 0 || !contactoActivo) return;
+            const file = input.files[0];
+            
+            if (file.size > 8 * 1024 * 1024) {
+                alert("El archivo supera el límite de 8 MB.");
+                input.value = '';
+                return;
+            }
+
+            let mensajeContenido = '';
+
+            if (file.type.startsWith('image/')) {
+                const imgBase64 = await convertAndCompressBase64(file);
+                mensajeContenido = `<img src="${imgBase64}" style="max-width: 100%; border-radius: 8px; margin-top: 5px; display: block;">`;
+            } else {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => {
+                    const base64Data = reader.result;
+                    mensajeContenido = `📁 <a href="${base64Data}" download="${file.name}" style="color:var(--link-color); text-decoration:underline; font-weight:bold;">${file.name}</a>`;
+                    enviarMensajeAdjunto(mensajeContenido);
+                    input.value = '';
+                };
+                return;
+            }
+
+            enviarMensajeAdjunto(mensajeContenido);
+            input.value = '';
+        }
+
+        function enviarMensajeAdjunto(texto) {
+            if (contactoActivo) {
+                socket.emit('mensaje_enviado', {
+                    emisor: miUsuario.id,
+                    nombreEmisor: miUsuario.nombre,
+                    fotoEmisor: miUsuario.foto,
+                    receptor: contactoActivo.id,
+                    esGrupo: contactoActivo.esGrupo ? 1 : 0,
+                    texto: texto
+                });
             }
         }
 
@@ -1040,7 +1118,10 @@ def obtener_contactos(data):
             WHERE c.mi_id = ?
         """, (mi_id,))
         for r in cursor.fetchall():
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False})
+            clave = "_".join(sorted([mi_id, r['id']]))
+            cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = ? AND emisor != ? AND leido = 0", (clave, mi_id))
+            unread = cursor.fetchone()['unread']
+            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread})
             ids_agregados.add(r['id'])
 
         cursor.execute("""
@@ -1055,7 +1136,10 @@ def obtener_contactos(data):
                 cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ?", (otro_id,))
                 u = cursor.fetchone()
                 if u:
-                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False})
+                    clave = "_".join(sorted([mi_id, u['id']]))
+                    cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = ? AND emisor != ? AND leido = 0", (clave, mi_id))
+                    unread = cursor.fetchone()['unread']
+                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread})
                     ids_agregados.add(u['id'])
 
         cursor.execute("""
@@ -1065,7 +1149,9 @@ def obtener_contactos(data):
             WHERE mg.usuario_id = ?
         """, (mi_id,))
         for r in cursor.fetchall():
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True})
+            cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = ? AND emisor != ? AND leido = 0", (r['id'], mi_id))
+            unread = cursor.fetchone()['unread']
+            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread})
 
     emit('contactos_cargados', lista)
 
@@ -1105,13 +1191,30 @@ def eliminar_contacto(data):
 def cargar_historial(data):
     es_grupo = data.get('esGrupo', False)
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
+    mi_id = data['emisor']
     
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = ? AND emisor != ?", (clave_chat, mi_id))
+        conn.commit()
+        
         cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = ? ORDER BY fecha ASC", (clave_chat,))
         historial = [dict(r) for r in cursor.fetchall()]
 
     emit('historial_cargado', historial)
+    obtener_contactos({'id': mi_id})
+
+@socketio.on('marcar_leido')
+def marcar_leido(data):
+    es_grupo = data.get('esGrupo', False)
+    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
+    mi_id = data['emisor']
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = ? AND emisor != ?", (clave_chat, mi_id))
+        conn.commit()
+    obtener_contactos({'id': mi_id})
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
@@ -1121,8 +1224,8 @@ def manejar_mensaje(data):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
         """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
         conn.commit()
 
