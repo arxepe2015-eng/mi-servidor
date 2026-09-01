@@ -1,20 +1,46 @@
 import os
-import sqlite3
+import json
 import random
+import psycopg2
+import psycopg2.extras
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit, join_room, leave_room
+from werkzeug.security import generate_password_hash, check_password_hash
+from pywebpush import webpush, WebPushException
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
+# La SECRET_KEY se lee de una variable de entorno en producción (Render).
+# Si no existe (p.ej. en local), se usa un valor de repuesto solo para pruebas.
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'arxechat_clave_secreta_123_dev')
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
 
-DB_NAME = 'arxechat.db'
+# --- BASE DE DATOS PERSISTENTE (PostgreSQL) ---
+# En Render (plan gratuito) el disco es efímero: cualquier archivo local
+# (como un .db de SQLite) se borra en cada reinicio/despliegue.
+# Por eso los datos se guardan ahora en una base de datos PostgreSQL externa,
+# indicada mediante la variable de entorno DATABASE_URL (p.ej. de Neon, Supabase o Render Postgres).
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if not DATABASE_URL:
+    raise RuntimeError(
+        "Falta la variable de entorno DATABASE_URL. Añádela en Render con la cadena de "
+        "conexión de tu base de datos PostgreSQL (ver instrucciones adjuntas)."
+    )
+
+# Render Postgres / algunos proveedores dan la URL como postgres:// en vez de postgresql://
+if DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+
+# --- CLAVES VAPID PARA NOTIFICACIONES PUSH ---
+VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '')
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
+VAPID_CLAIMS_EMAIL = os.environ.get('VAPID_CLAIMS_EMAIL', 'mailto:admin@example.com')
+
 
 def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
+
 
 def init_db():
     with get_db() as conn:
@@ -55,7 +81,7 @@ def init_db():
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS mensajes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 clave_chat TEXT,
                 emisor TEXT,
                 receptor TEXT,
@@ -63,12 +89,56 @@ def init_db():
                 nombreEmisor TEXT,
                 fotoEmisor TEXT,
                 es_grupo INTEGER DEFAULT 0,
-                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+                fecha TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        # Suscripciones de notificaciones push (una fila por dispositivo/navegador)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id SERIAL PRIMARY KEY,
+                usuario_id TEXT,
+                endpoint TEXT UNIQUE,
+                p256dh TEXT,
+                auth TEXT
             )
         ''')
         conn.commit()
 
 init_db()
+
+
+def enviar_push_a_usuario(usuario_id, emisor_id, titulo, cuerpo, url='/'):
+    """Envía una notificación push real (llega aunque la pestaña esté cerrada)
+    a todos los dispositivos guardados de un usuario, salvo que sea el propio emisor."""
+    if usuario_id == emisor_id:
+        return
+    if not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+        return  # Push no configurado (faltan las claves VAPID en las variables de entorno)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE usuario_id = %s", (usuario_id,))
+        subs = cursor.fetchall()
+
+        payload = json.dumps({'title': titulo, 'body': cuerpo, 'url': url})
+
+        for s in subs:
+            try:
+                webpush(
+                    subscription_info={
+                        "endpoint": s['endpoint'],
+                        "keys": {"p256dh": s['p256dh'], "auth": s['auth']}
+                    },
+                    data=payload,
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={"sub": VAPID_CLAIMS_EMAIL}
+                )
+            except WebPushException as ex:
+                status = getattr(ex.response, 'status_code', None)
+                if status in (404, 410):
+                    # La suscripción ya no es válida (navegador desinstalado, permiso revocado, etc.)
+                    cursor.execute("DELETE FROM push_subscriptions WHERE id = %s", (s['id'],))
+        conn.commit()
 
 HTML_LAYOUT = """
 <!DOCTYPE html>
@@ -363,6 +433,7 @@ HTML_LAYOUT = """
 
     <script>
         const socket = io();
+        const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
         let isRegister = false;
         let miUsuario = null;
         let contactoActivo = null;
@@ -477,9 +548,42 @@ HTML_LAYOUT = """
             }
         });
 
-        function solicitarPermisoNotificaciones() {
-            if ("Notification" in window && Notification.permission === "default") {
-                Notification.requestPermission();
+        function urlBase64ToUint8Array(base64String) {
+            const padding = '='.repeat((4 - base64String.length % 4) % 4);
+            const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+            const rawData = window.atob(base64);
+            const outputArray = new Uint8Array(rawData.length);
+            for (let i = 0; i < rawData.length; ++i) {
+                outputArray[i] = rawData.charCodeAt(i);
+            }
+            return outputArray;
+        }
+
+        // Registra el Service Worker y activa notificaciones push reales:
+        // llegan aunque la pestaña o el navegador estén cerrados (mientras el
+        // sistema operativo no cierre por completo el navegador en segundo plano).
+        async function solicitarPermisoNotificaciones() {
+            if (!('serviceWorker' in navigator) || !('PushManager' in window) || !VAPID_PUBLIC_KEY) {
+                return;
+            }
+            try {
+                const registration = await navigator.serviceWorker.register('/service-worker.js');
+                const permiso = await Notification.requestPermission();
+                if (permiso !== 'granted') return;
+
+                let subscription = await registration.pushManager.getSubscription();
+                if (!subscription) {
+                    subscription = await registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+                    });
+                }
+                socket.emit('guardar_subscripcion_push', {
+                    usuario_id: miUsuario.id,
+                    subscription: subscription.toJSON()
+                });
+            } catch (err) {
+                console.warn('No se pudieron activar las notificaciones push:', err);
             }
         }
 
@@ -536,11 +640,18 @@ HTML_LAYOUT = """
         function cerrarModalGrupo() { document.getElementById('addGroupModal').style.display = 'none'; }
 
         function abrirModalAddMember() {
+            // Se oculta primero el modal de "Opciones del Grupo" para que no quede
+            // apilado debajo (eso era lo que dejaba el fondo en negro).
+            document.getElementById('groupSettingsModal').style.display = 'none';
             document.getElementById('addMemberInput').value = '';
             document.getElementById('addMemberSuggestions').style.display = 'none';
             document.getElementById('addMemberModal').style.display = 'flex';
         }
-        function cerrarModalAddMember() { document.getElementById('addMemberModal').style.display = 'none'; }
+        function cerrarModalAddMember() {
+            document.getElementById('addMemberModal').style.display = 'none';
+            // Al cerrar (con la X o tras añadir), se vuelve a mostrar "Opciones del Grupo".
+            document.getElementById('groupSettingsModal').style.display = 'flex';
+        }
 
         /* Filtrado y sugerencias de contactos */
         function filtrarSugerencias(inputElem, suggestionsContainerId) {
@@ -963,10 +1074,8 @@ HTML_LAYOUT = """
             if(contactoActivo && (data.clave_chat === contactoActivo.id || data.emisor === contactoActivo.id || data.receptor === miUsuario.id)) {
                 renderizarMensaje(data);
             }
-
-            if (data.emisor !== miUsuario.id && Notification.permission === "granted") {
-                new Notification("Mensaje de " + data.nombreEmisor, { body: data.texto });
-            }
+            // La notificación visual ahora la muestra el Service Worker (push real),
+            // así llega igual aunque la pestaña esté cerrada; aquí ya no se duplica.
         });
 
         function sendMessage() {
@@ -993,17 +1102,13 @@ HTML_LAYOUT = """
 </html>
 """
 
-@app.route('/')
-def home():
-    return render_template_string(HTML_LAYOUT)
-
 @socketio.on('conectar_usuario')
 def conectar(data):
     join_room(data['id'])
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = ?", (data['id'],))
+        cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = %s", (data['id'],))
         for r in cursor.fetchall():
             join_room(r['grupo_id'])
 
@@ -1012,22 +1117,31 @@ def registrar(data):
     nombre = data['nombre']
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (nombre,))
+        cursor.execute("SELECT id FROM usuarios WHERE nombre = %s", (nombre,))
         row = cursor.fetchone()
-        
+
         if row:
-            nuevo_id = row['id']
-            cursor.execute("UPDATE usuarios SET pass = ?, foto = ? WHERE id = ?", (data['pass'], data.get('foto'), nuevo_id))
-        else:
-            nuevo_id = str(random.randint(10000000, 99999999))
-            cursor.execute(
-                "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
-            )
+            # Corregido: antes, registrarse con un nombre ya existente sobrescribía
+            # la contraseña de esa cuenta sin comprobar nada (cualquiera podía
+            # "robar" una cuenta ajena solo con su nombre). Ahora se rechaza.
+            emit('auth_resultado', {
+                'exito': False,
+                'mensaje': 'Ese nombre de usuario ya existe. Inicia sesión o elige otro nombre.'
+            })
+            return
+
+        nuevo_id = str(random.randint(10000000, 99999999))
+        pass_hash = generate_password_hash(data['pass'])
+        cursor.execute(
+            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (nuevo_id, nombre, pass_hash, data.get('foto'), None, 'dark', 100)
+        )
         conn.commit()
-        
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (nuevo_id,))
+
+        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (nuevo_id,))
         nuevo_usuario = dict(cursor.fetchone())
+        nuevo_usuario.pop('pass', None)
+        nuevo_usuario['pass'] = data['pass']  # se devuelve en texto plano solo para guardar la sesión local
 
         emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
 
@@ -1036,11 +1150,12 @@ def login(data):
     nombre = data['nombre']
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE nombre = ?", (nombre,))
+        cursor.execute("SELECT * FROM usuarios WHERE nombre = %s", (nombre,))
         row = cursor.fetchone()
-        
-        if row and row['pass'] == data['pass']:
+
+        if row and check_password_hash(row['pass'], data['pass']):
             usuario = dict(row)
+            usuario['pass'] = data['pass']  # se devuelve en texto plano solo para guardar la sesión local
             emit('auth_resultado', {'exito': True, 'usuario': usuario})
         else:
             emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
@@ -1049,28 +1164,35 @@ def login(data):
 def actualizar_perfil(data):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (data['id'],))
+        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
         row = cursor.fetchone()
         if not row:
             emit('perfil_actualizado', {'exito': False, 'mensaje': 'Usuario no encontrado.'})
             return
 
         nuevo_nombre = data['nombre']
-        nueva_pass = data['pass'] if data['pass'] else row['pass']
+        nueva_pass_hash = generate_password_hash(data['pass']) if data['pass'] else row['pass']
+        nueva_pass_plana = data['pass'] if data['pass'] else None
         nueva_foto = data['foto']
         nuevo_fondo = data.get('fondoChat')
         nuevo_tema = data.get('tema', 'dark')
         nuevo_brillo = data.get('brilloFondo', 100)
 
         cursor.execute("""
-            UPDATE usuarios 
-            SET nombre = ?, pass = ?, foto = ?, fondoChat = ?, tema = ?, brilloFondo = ? 
-            WHERE id = ?
-        """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
+            UPDATE usuarios
+            SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s
+            WHERE id = %s
+        """, (nuevo_nombre, nueva_pass_hash, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
         conn.commit()
 
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (data['id'],))
+        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
         u_updated = dict(cursor.fetchone())
+        # Para mantener la sesión local funcionando, se devuelve la contraseña en texto
+        # plano solo si el usuario la acaba de cambiar; si no, se conserva la que ya tenía el cliente.
+        if nueva_pass_plana:
+            u_updated['pass'] = nueva_pass_plana
+        else:
+            u_updated['pass'] = data.get('passActual', u_updated['pass'])
         emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
 
 @socketio.on('crear_grupo')
@@ -1083,15 +1205,17 @@ def crear_grupo(data):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (?, ?, ?, ?)",
+        cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (%s, %s, %s, %s)",
                        (grupo_id, nombre, foto, creador_id))
-        
+
         for m_id in miembros:
-            cursor.execute("SELECT id FROM usuarios WHERE id = ?", (m_id,))
+            cursor.execute("SELECT id FROM usuarios WHERE id = %s", (m_id,))
             if cursor.fetchone():
                 aceptado = 1 if m_id == creador_id else 0
-                cursor.execute("INSERT OR IGNORE INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (?, ?, ?)",
-                               (grupo_id, m_id, aceptado))
+                cursor.execute(
+                    "INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (grupo_id, usuario_id) DO NOTHING",
+                    (grupo_id, m_id, aceptado))
         conn.commit()
 
     join_room(grupo_id)
@@ -1104,12 +1228,15 @@ def anadir_miembro_grupo(data):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE id = ?", (u_id,))
+        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (u_id,))
         if not cursor.fetchone():
             emit('miembro_anadido_resultado', {'exito': False, 'mensaje': 'El usuario no existe.'})
             return
 
-        cursor.execute("INSERT OR IGNORE INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (?, ?, 0)", (grupo_id, u_id))
+        cursor.execute(
+            "INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, 0) "
+            "ON CONFLICT (grupo_id, usuario_id) DO NOTHING",
+            (grupo_id, u_id))
         conn.commit()
 
     emit('miembro_anadido_resultado', {'exito': True})
@@ -1121,10 +1248,10 @@ def obtener_detalles_grupo(data):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT u.id, u.nombre, u.foto 
-            FROM miembros_grupo mg 
-            JOIN usuarios u ON mg.usuario_id = u.id 
-            WHERE mg.grupo_id = ?
+            SELECT u.id, u.nombre, u.foto
+            FROM miembros_grupo mg
+            JOIN usuarios u ON mg.usuario_id = u.id
+            WHERE mg.grupo_id = %s
         """, (grupo_id,))
         miembros = [dict(r) for r in cursor.fetchall()]
     emit('detalles_grupo_cargados', {'miembros': miembros})
@@ -1137,9 +1264,9 @@ def actualizar_grupo(data):
     with get_db() as conn:
         cursor = conn.cursor()
         if foto:
-            cursor.execute("UPDATE grupos SET nombre = ?, foto = ? WHERE id = ?", (nombre, foto, grupo_id))
+            cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s", (nombre, foto, grupo_id))
         else:
-            cursor.execute("UPDATE grupos SET nombre = ? WHERE id = ?", (nombre, grupo_id))
+            cursor.execute("UPDATE grupos SET nombre = %s WHERE id = %s", (nombre, grupo_id))
         conn.commit()
     emit('grupo_actualizado', {'exito': True})
 
@@ -1147,7 +1274,7 @@ def actualizar_grupo(data):
 def aceptar_grupo(data):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = ? AND usuario_id = ?",
+        cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = %s AND usuario_id = %s",
                        (data['grupo_id'], data['usuario_id']))
         conn.commit()
     join_room(data['grupo_id'])
@@ -1161,15 +1288,15 @@ def salir_grupo(data):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ? AND usuario_id = ?",
+        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s",
                        (grupo_id, usuario_id))
-        
-        cursor.execute("SELECT COUNT(*) as total FROM miembros_grupo WHERE grupo_id = ?", (grupo_id,))
+
+        cursor.execute("SELECT COUNT(*) as total FROM miembros_grupo WHERE grupo_id = %s", (grupo_id,))
         count = cursor.fetchone()['total']
 
         if count == 0:
-            cursor.execute("DELETE FROM grupos WHERE id = ?", (grupo_id,))
-            cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 1", (grupo_id,))
+            cursor.execute("DELETE FROM grupos WHERE id = %s", (grupo_id,))
+            cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 1", (grupo_id,))
 
         conn.commit()
 
@@ -1180,9 +1307,9 @@ def eliminar_grupo_completo(data):
     grupo_id = data['grupo_id']
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ?", (grupo_id,))
-        cursor.execute("DELETE FROM grupos WHERE id = ?", (grupo_id,))
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 1", (grupo_id,))
+        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s", (grupo_id,))
+        cursor.execute("DELETE FROM grupos WHERE id = %s", (grupo_id,))
+        cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 1", (grupo_id,))
         conn.commit()
 
     emit('grupo_eliminado', room=grupo_id)
@@ -1195,37 +1322,37 @@ def obtener_contactos(data):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute("""
-            SELECT u.id, u.nombre, u.foto 
-            FROM contactos c 
-            JOIN usuarios u ON c.contacto_id = u.id 
-            WHERE c.mi_id = ?
+            SELECT u.id, u.nombre, u.foto
+            FROM contactos c
+            JOIN usuarios u ON c.contacto_id = u.id
+            WHERE c.mi_id = %s
         """, (mi_id,))
         for r in cursor.fetchall():
             lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False})
             ids_agregados.add(r['id'])
 
         cursor.execute("""
-            SELECT DISTINCT emisor, receptor 
-            FROM mensajes 
-            WHERE (emisor = ? OR receptor = ?) AND es_grupo = 0
+            SELECT DISTINCT emisor, receptor
+            FROM mensajes
+            WHERE (emisor = %s OR receptor = %s) AND es_grupo = 0
         """, (mi_id, mi_id))
-        
+
         for r in cursor.fetchall():
             otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
             if otro_id not in ids_agregados:
-                cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ?", (otro_id,))
+                cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = %s", (otro_id,))
                 u = cursor.fetchone()
                 if u:
                     lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False})
                     ids_agregados.add(u['id'])
 
         cursor.execute("""
-            SELECT g.id, g.nombre, g.foto, mg.aceptado 
-            FROM miembros_grupo mg 
-            JOIN grupos g ON mg.grupo_id = g.id 
-            WHERE mg.usuario_id = ?
+            SELECT g.id, g.nombre, g.foto, mg.aceptado
+            FROM miembros_grupo mg
+            JOIN grupos g ON mg.grupo_id = g.id
+            WHERE mg.usuario_id = %s
         """, (mi_id,))
         for r in cursor.fetchall():
             lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True})
@@ -1239,12 +1366,14 @@ def guardar_contacto(data):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE id = ?", (contacto_id,))
+        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (contacto_id,))
         if not cursor.fetchone():
             emit('contacto_resultado', {'exito': False, 'mensaje': 'El ID introducido no existe.'})
             return
 
-        cursor.execute("INSERT OR IGNORE INTO contactos (mi_id, contacto_id) VALUES (?, ?)", (mi_id, contacto_id))
+        cursor.execute(
+            "INSERT INTO contactos (mi_id, contacto_id) VALUES (%s, %s) ON CONFLICT (mi_id, contacto_id) DO NOTHING",
+            (mi_id, contacto_id))
         conn.commit()
 
     emit('contacto_resultado', {'exito': True, 'mensaje': 'Contacto añadido.'})
@@ -1258,8 +1387,8 @@ def eliminar_contacto(data):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM contactos WHERE mi_id = ? AND contacto_id = ?", (mi_id, contacto_id))
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 0", (clave_chat,))
+        cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (mi_id, contacto_id))
+        cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 0", (clave_chat,))
         conn.commit()
 
     obtener_contactos({'id': mi_id})
@@ -1268,10 +1397,10 @@ def eliminar_contacto(data):
 def cargar_historial(data):
     es_grupo = data.get('esGrupo', False)
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = ? ORDER BY fecha ASC", (clave_chat,))
+        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
         historial = [dict(r) for r in cursor.fetchall()]
 
     emit('historial_cargado', historial)
@@ -1280,14 +1409,22 @@ def cargar_historial(data):
 def manejar_mensaje(data):
     es_grupo = data.get('esGrupo', 0)
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
         conn.commit()
+
+        # Destinatarios de la notificación push: el otro usuario (chat privado)
+        # o todos los miembros aceptados del grupo salvo quien envía (chat de grupo)
+        if es_grupo:
+            cursor.execute("SELECT usuario_id FROM miembros_grupo WHERE grupo_id = %s AND aceptado = 1", (data['receptor'],))
+            destinatarios = [r['usuario_id'] for r in cursor.fetchall()]
+        else:
+            destinatarios = [data['receptor']]
 
     nuevo_msg = {
         'clave_chat': clave_chat,
@@ -1304,6 +1441,81 @@ def manejar_mensaje(data):
     else:
         emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
         emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+
+    # Notificación push real: llega aunque el destinatario tenga la pestaña
+    # cerrada (siempre que el navegador la haya permitido y el SO no la bloquee).
+    for dest_id in destinatarios:
+        enviar_push_a_usuario(
+            dest_id,
+            data['emisor'],
+            titulo=data['nombreEmisor'],
+            cuerpo=data['texto'],
+            url='/'
+        )
+
+@socketio.on('guardar_subscripcion_push')
+def guardar_subscripcion_push(data):
+    """El navegador envía aquí la suscripción push (endpoint + claves) tras
+    pedir permiso de notificaciones, para poder avisar al usuario aunque
+    tenga la pestaña cerrada."""
+    usuario_id = data.get('usuario_id')
+    sub = data.get('subscription')
+    if not usuario_id or not sub:
+        return
+
+    endpoint = sub.get('endpoint')
+    keys = sub.get('keys', {})
+    p256dh = keys.get('p256dh')
+    auth = keys.get('auth')
+    if not endpoint or not p256dh or not auth:
+        return
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO push_subscriptions (usuario_id, endpoint, p256dh, auth)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (endpoint) DO UPDATE
+            SET usuario_id = EXCLUDED.usuario_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
+        """, (usuario_id, endpoint, p256dh, auth))
+        conn.commit()
+
+
+@app.route('/service-worker.js')
+def service_worker():
+    js = """
+self.addEventListener('push', function(event) {
+    let data = {};
+    try { data = event.data ? event.data.json() : {}; } catch (e) { data = {}; }
+    const title = data.title || 'Arxechat';
+    const options = {
+        body: data.body || '',
+        icon: data.icon || undefined,
+        badge: data.badge || undefined,
+        data: { url: data.url || '/' }
+    };
+    event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', function(event) {
+    event.notification.close();
+    const targetUrl = (event.notification.data && event.notification.data.url) || '/';
+    event.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
+            for (const client of clientList) {
+                if ('focus' in client) return client.focus();
+            }
+            if (clients.openWindow) return clients.openWindow(targetUrl);
+        })
+    );
+});
+"""
+    return app.response_class(js, mimetype='application/javascript')
+
+
+@app.route('/')
+def home():
+    return render_template_string(HTML_LAYOUT, vapid_public_key=VAPID_PUBLIC_KEY)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
