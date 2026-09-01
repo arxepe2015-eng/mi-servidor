@@ -36,58 +36,89 @@ HTML_LAYOUT = """
     <title>Arxechat</title>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <style>
+        :root {
+            --bg-body: #0b141a;
+            --bg-card: #111b21;
+            --bg-header: #202c33;
+            --bg-input: #2a3942;
+            --text-main: #e9edef;
+            --text-sub: #8696a0;
+            --accent: #00a884;
+            --msg-sent: #005c4b;
+            --msg-recv: #202c33;
+            --border-color: #222d34;
+            --link-color: #53bdeb;
+        }
+
+        body.light-theme {
+            --bg-body: #e9edef;
+            --bg-card: #ffffff;
+            --bg-header: #f0f2f5;
+            --bg-input: #f0f2f5;
+            --text-main: #111b21;
+            --text-sub: #667781;
+            --accent: #008069;
+            --msg-sent: #d9fdd3;
+            --msg-recv: #ffffff;
+            --border-color: #e9edef;
+            --link-color: #027eb5;
+        }
+
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
-        body { background-color: #0b141a; color: #e9edef; height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; }
+        body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
         
         /* Modales */
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11,20,26,0.95); display: flex; justify-content: center; align-items: center; z-index: 1000; }
-        .modal-box { background: #111b21; padding: 25px; border-radius: 12px; width: 90%; max-width: 400px; text-align: center; border: 1px solid #222d34; position: relative; }
-        .modal-box h2 { margin-bottom: 15px; color: #00a884; }
-        .modal-box input { width: 100%; padding: 14px; margin: 8px 0; background: #2a3942; border: 1px solid transparent; border-radius: 6px; color: white; outline: none; font-size: 1rem; }
-        .modal-box input.input-error { border: 2px solid #ea4335 !important; background-color: #3b2224 !important; }
-        .file-label { display: block; text-align: left; font-size: 0.85rem; color: #8696a0; margin-top: 10px; }
-        .modal-box button, .btn-action { width: 100%; padding: 14px; background: #00a884; border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; margin-top: 12px; font-size: 1rem; }
-        .btn-copy { background: #202c33; border: 1px solid #00a884; color: #00a884; margin-top: 8px; }
-        .btn-danger { background: #ea4335 !important; margin-top: 10px !important; }
-        .auth-toggle { margin-top: 15px; font-size: 0.9rem; color: #8696a0; cursor: pointer; padding: 10px; }
-        .auth-toggle span { color: #00a884; text-decoration: underline; }
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+        .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
+        .modal-box h2 { margin-bottom: 15px; color: var(--accent); }
+        .modal-box input, .modal-box select { width: 100%; padding: 12px; margin: 8px 0; background: var(--bg-input); border: 1px solid transparent; border-radius: 6px; color: var(--text-main); outline: none; font-size: 1rem; }
+        .modal-box input.input-error { border: 2px solid #ea4335 !important; }
+        .file-label { display: block; text-align: left; font-size: 0.85rem; color: var(--text-sub); margin-top: 10px; }
+        .modal-box button, .btn-action { width: 100%; padding: 12px; background: var(--accent); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; margin-top: 10px; font-size: 1rem; }
+        .btn-copy { background: var(--bg-header); border: 1px solid var(--accent); color: var(--accent); }
+        .btn-danger { background: #ea4335 !important; }
+        .auth-toggle { margin-top: 15px; font-size: 0.9rem; color: var(--text-sub); cursor: pointer; padding: 5px; }
+        .auth-toggle span { color: var(--accent); text-decoration: underline; }
         .error-msg { color: #ea4335; font-size: 0.85rem; margin-top: 5px; display: none; }
-        .close-btn { position: absolute; top: 10px; right: 15px; color: #8696a0; font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
+        .close-btn { position: absolute; top: 10px; right: 15px; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; }
 
         /* Contenedor Principal */
-        .app-container { width: 100%; height: 100vh; display: flex; background: #111b21; display: none; }
+        .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
         
         /* Sidebar Izquierdo */
-        .sidebar { width: 350px; border-right: 1px solid #222d34; display: flex; flex-direction: column; background: #111b21; }
-        .sidebar-header { background: #202c33; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
-        .user-info-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; background: none; border: none; text-align: left; color: white; }
+        .sidebar { width: 350px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
+        .sidebar-header { background: var(--bg-header); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+        .user-info-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; background: none; border: none; text-align: left; color: var(--text-main); }
         .user-avatar { width: 42px; height: 42px; border-radius: 50%; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 1.2rem; color: white; object-fit: cover; flex-shrink: 0; }
-        .add-btn { background: #00a884; border: none; color: white; width: 40px; height: 40px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
+        .add-btn { background: var(--accent); border: none; color: white; width: 40px; height: 40px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
         .contacts-list { flex: 1; overflow-y: auto; }
-        .contact-item { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid #222d34; cursor: pointer; gap: 15px; background: transparent; width: 100%; border-left: none; border-right: none; border-top: none; text-align: left; color: white; }
-        .contact-item:hover, .contact-item:active { background: #202c33; }
+        .contact-item { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border-color); cursor: pointer; gap: 15px; background: transparent; width: 100%; border-left: none; border-right: none; border-top: none; text-align: left; color: var(--text-main); }
+        .contact-item:hover, .contact-item:active { background: var(--bg-header); }
         .contact-info { display: flex; flex-direction: column; flex: 1; }
         .contact-name { font-weight: bold; font-size: 1rem; }
-        .contact-id { font-size: 0.8rem; color: #8696a0; }
+        .contact-id { font-size: 0.8rem; color: var(--text-sub); }
 
         /* Panel Central */
-        .chat-area { flex: 1; display: flex; flex-direction: column; background: #0b141a; }
-        .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #8696a0; padding: 20px; }
-        .empty-state h3 { color: #e9edef; margin-bottom: 10px; font-size: 1.5rem; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; }
+        .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-sub); padding: 20px; }
+        .empty-state h3 { color: var(--text-main); margin-bottom: 10px; font-size: 1.5rem; }
         
         /* Chat Activo */
-        .active-chat-container { flex: 1; display: none; flex-direction: column; height: 100%; }
-        .chat-header { background: #202c33; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #222d34; }
+        .active-chat-container { flex: 1; display: none; flex-direction: column; height: 100%; position: relative; z-index: 1; }
+        .chat-header { background: var(--bg-header); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); }
         .chat-header-user { display: flex; align-items: center; gap: 12px; }
-        .add-contact-banner { background: #004338; color: #00a884; border: 1px solid #00a884; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: bold; cursor: pointer; margin-left: 10px; }
-        .chat-menu-btn { background: none; border: none; color: #8696a0; font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
-        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-        .message { max-width: 65%; padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; }
-        .message.received { background: #202c33; align-self: flex-start; border-top-left-radius: 0; }
-        .message.sent { background: #005c4b; align-self: flex-end; border-top-right-radius: 0; }
-        .chat-input-area { background: #202c33; padding: 12px 16px; display: flex; gap: 10px; align-items: center; }
-        .chat-input-area input { flex: 1; padding: 12px; background: #2a3942; border: none; border-radius: 8px; color: white; outline: none; font-size: 1rem; }
-        .chat-input-area button { background: #00a884; border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
+        .add-contact-banner { background: var(--accent); color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: bold; cursor: pointer; margin-left: 10px; }
+        .chat-menu-btn { background: none; border: none; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
+        
+        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; background-size: cover; background-position: center; }
+        .message { max-width: 65%; padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); }
+        .message.received { background: var(--msg-recv); align-self: flex-start; border-top-left-radius: 0; }
+        .message.sent { background: var(--msg-sent); align-self: flex-end; border-top-right-radius: 0; }
+        .message a { color: var(--link-color); text-decoration: underline; word-break: break-all; }
+
+        .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; }
+        .chat-input-area input { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
+        .chat-input-area button { background: var(--accent); border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
         
         @media (max-width: 768px) {
             .sidebar { width: 100%; }
@@ -126,13 +157,25 @@ HTML_LAYOUT = """
             <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
             <h2>Ajustes de Perfil</h2>
             <div style="margin-bottom: 10px;">
-                <span id="modalMyID" style="color: #00a884; font-weight: bold;">ID: --------</span>
+                <span id="modalMyID" style="color: var(--accent); font-weight: bold;">ID: --------</span>
                 <button type="button" class="btn-action btn-copy" onclick="copiarMiID()">Copiar mi ID</button>
             </div>
+            
             <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
             <input type="password" id="editPass" placeholder="Nueva contraseña (opcional)">
+            
+            <label class="file-label">Tema visual:</label>
+            <select id="editTheme">
+                <option value="dark">Oscuro (Negro)</option>
+                <option value="light">Claro (Blanco)</option>
+            </select>
+
             <label class="file-label">Cambiar foto de perfil:</label>
             <input type="file" id="editFoto" accept="image/*">
+
+            <label class="file-label">Cambiar fondo de chat:</label>
+            <input type="file" id="editFondoChat" accept="image/*">
+
             <button type="button" class="btn-action" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
         </div>
@@ -148,7 +191,7 @@ HTML_LAYOUT = """
                     <div id="myAvatarText" class="user-avatar">U</div>
                     <div>
                         <div id="myName" style="font-weight:bold;">Usuario</div>
-                        <div id="myID" style="font-size:0.75rem; color:#00a884;">ID: --------</div>
+                        <div id="myID" style="font-size:0.75rem; color: var(--accent);">ID: --------</div>
                     </div>
                 </button>
                 <button type="button" class="add-btn" onclick="agregarContacto()" title="Añadir contacto">+</button>
@@ -170,7 +213,7 @@ HTML_LAYOUT = """
                         <div id="activeAvatarText" class="user-avatar">?</div>
                         <div>
                             <div id="activeName" class="contact-name">Contacto</div>
-                            <div id="activeStatus" style="font-size:0.8rem; color:#8696a0;">En línea</div>
+                            <div id="activeStatus" style="font-size:0.8rem; color: var(--text-sub);">En línea</div>
                         </div>
                         <button type="button" id="btnAddContactBanner" class="add-contact-banner" style="display:none;" onclick="guardarContactoTemporal()">+ Añadir a contactos</button>
                     </div>
@@ -199,6 +242,21 @@ HTML_LAYOUT = """
                 iniciarApp();
             }
         };
+
+        function aplicarTema() {
+            if (miUsuario && miUsuario.tema === 'light') {
+                document.body.classList.add('light-theme');
+            } else {
+                document.body.classList.remove('light-theme');
+            }
+
+            const msgDiv = document.getElementById('messages');
+            if (miUsuario && miUsuario.fondoChat) {
+                msgDiv.style.backgroundImage = `url('${miUsuario.fondoChat}')`;
+            } else {
+                msgDiv.style.backgroundImage = 'none';
+            }
+        }
 
         function toggleAuthMode() {
             isRegister = !isRegister;
@@ -280,9 +338,10 @@ HTML_LAYOUT = """
                 document.getElementById('myAvatarText').innerText = miUsuario.nombre.charAt(0).toUpperCase();
             }
 
+            aplicarTema();
+
             if ("Notification" in window) Notification.requestPermission();
             
-            // Conectar a la sala personal
             socket.emit('conectar_usuario', { id: miUsuario.id });
             socket.emit('obtener_contactos', { id: miUsuario.id });
         }
@@ -294,6 +353,7 @@ HTML_LAYOUT = """
 
         function abrirAjustes() {
             document.getElementById('editName').value = miUsuario.nombre;
+            document.getElementById('editTheme').value = miUsuario.tema || 'dark';
             document.getElementById('settingsModal').style.display = 'flex';
         }
 
@@ -304,14 +364,28 @@ HTML_LAYOUT = """
         async function guardarAjustes() {
             const nuevoNombre = document.getElementById('editName').value.trim();
             const nuevaPass = document.getElementById('editPass').value;
-            const fileInput = document.getElementById('editFoto');
+            const nuevoTema = document.getElementById('editTheme').value;
             
+            const fileFoto = document.getElementById('editFoto');
             let nuevaFoto = miUsuario.foto;
-            if (fileInput.files.length > 0) {
-                nuevaFoto = await convertBase64(fileInput.files[0]);
+            if (fileFoto.files.length > 0) {
+                nuevaFoto = await convertBase64(fileFoto.files[0]);
             }
 
-            socket.emit('actualizar_perfil', { id: miUsuario.id, nombre: nuevoNombre, pass: nuevaPass, foto: nuevaFoto });
+            const fileFondo = document.getElementById('editFondoChat');
+            let nuevoFondo = miUsuario.fondoChat;
+            if (fileFondo.files.length > 0) {
+                nuevoFondo = await convertBase64(fileFondo.files[0]);
+            }
+
+            socket.emit('actualizar_perfil', { 
+                id: miUsuario.id, 
+                nombre: nuevoNombre, 
+                pass: nuevaPass, 
+                foto: nuevaFoto,
+                fondoChat: nuevoFondo,
+                tema: nuevoTema
+            });
         }
 
         socket.on('perfil_actualizado', (res) => {
@@ -350,13 +424,13 @@ HTML_LAYOUT = """
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'contact-item';
-                btn.onclick = () => seleccionarContacto(c.id, c.nombre, c.foto, true);
+                btn.onclick = () => seleccionarContacto(c.id, c.nombre, c.foto, c.esGuardado);
                 
                 const avatarHtml = c.foto ? `<img src="${c.foto}" class="user-avatar">` : `<div class="user-avatar">${c.nombre.charAt(0).toUpperCase()}</div>`;
                 btn.innerHTML = `
                     ${avatarHtml}
                     <div class="contact-info">
-                        <div class="contact-name">${c.nombre}</div>
+                        <div class="contact-name">${c.nombre} ${c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>'}</div>
                         <div class="contact-id">ID: ${c.id}</div>
                     </div>
                 `;
@@ -399,12 +473,8 @@ HTML_LAYOUT = """
         }
 
         function eliminarChat() {
-            if(contactoActivo && confirm("¿Quieres borrar esta conversación con " + contactoActivo.nombre + "?")) {
-                if(!contactoActivo.esGuardado) {
-                    // Si es un contacto no guardado, lo eliminamos de la lista
-                    misContactos = misContactos.filter(c => c.id !== contactoActivo.id);
-                    renderizarContactos();
-                }
+            if(contactoActivo && confirm("¿Quieres borrar este contacto y su conversación?")) {
+                socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
                 document.getElementById('emptyState').style.display = 'flex';
@@ -414,6 +484,13 @@ HTML_LAYOUT = """
             }
         }
 
+        function formatearTextoConLinks(texto) {
+            const urlRegex = /(https?:\/\/[^\s]+)/g;
+            return texto.replace(urlRegex, function(url) {
+                return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+            });
+        }
+
         socket.on('historial_cargado', (mensajes) => {
             const messagesDiv = document.getElementById('messages');
             messagesDiv.innerHTML = '';
@@ -421,26 +498,22 @@ HTML_LAYOUT = """
                 const msgElement = document.createElement('div');
                 msgElement.classList.add('message');
                 msgElement.classList.add(msg.emisor === miUsuario.id ? 'sent' : 'received');
-                msgElement.textContent = msg.texto;
+                msgElement.innerHTML = formatearTextoConLinks(msg.texto);
                 messagesDiv.appendChild(msgElement);
             });
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         });
 
         socket.on('recibir_mensaje', (data) => {
-            // Si no tenemos al contacto en la lista, lo añadimos temporalmente
-            const existe = misContactos.some(c => c.id === data.emisor);
-            if(!existe && data.emisor !== miUsuario.id) {
-                misContactos.push({ id: data.emisor, nombre: data.nombreEmisor, foto: data.fotoEmisor });
-                renderizarContactos();
-            }
+            // Recargar lista si es un mensaje de una persona nueva
+            socket.emit('obtener_contactos', { id: miUsuario.id });
 
             if(contactoActivo && (data.emisor === contactoActivo.id || data.emisor === miUsuario.id)) {
                 const messagesDiv = document.getElementById('messages');
                 const msgElement = document.createElement('div');
                 msgElement.classList.add('message');
                 msgElement.classList.add(data.emisor === miUsuario.id ? 'sent' : 'received');
-                msgElement.textContent = data.texto;
+                msgElement.innerHTML = formatearTextoConLinks(data.texto);
                 messagesDiv.appendChild(msgElement);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             }
@@ -479,7 +552,6 @@ def home():
 
 @socketio.on('conectar_usuario')
 def conectar(data):
-    # Conecta al usuario a una sala privada con su ID
     from flask_socketio import join_room
     join_room(data['id'])
 
@@ -498,6 +570,8 @@ def registrar(data):
         'nombre': nombre,
         'pass': data['pass'],
         'foto': data.get('foto'),
+        'fondoChat': None,
+        'tema': 'dark',
         'contactos': []
     }
     
@@ -524,6 +598,8 @@ def actualizar_perfil(data):
             if data['pass']:
                 u['pass'] = data['pass']
             u['foto'] = data['foto']
+            u['fondoChat'] = data.get('fondoChat')
+            u['tema'] = data.get('tema', 'dark')
             guardar_json(USUARIOS_FILE, usuarios)
             emit('perfil_actualizado', {'exito': True, 'usuario': u})
             return
@@ -531,18 +607,37 @@ def actualizar_perfil(data):
 @socketio.on('obtener_contactos')
 def obtener_contactos(data):
     usuarios = cargar_json(USUARIOS_FILE)
+    chats = cargar_json(CHATS_FILE)
+    mi_id = data['id']
+    
     mi_u = None
     for u in usuarios.values():
-        if u['id'] == data['id']:
+        if u['id'] == mi_id:
             mi_u = u
             break
     
     lista = []
+    ids_agregados = set()
+    
     if mi_u:
+        # 1. Contactos permanentes guardados
         for c_id in mi_u.get('contactos', []):
             for u in usuarios.values():
                 if u['id'] == c_id:
-                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto']})
+                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': True})
+                    ids_agregados.add(u['id'])
+
+        # 2. Contactos con historial de chat (contactos entrantes o temporales)
+        for clave in chats.keys():
+            partes = clave.split('_')
+            if mi_id in partes:
+                otro_id = partes[0] if partes[1] == mi_id else partes[1]
+                if otro_id not in ids_agregados:
+                    for u in usuarios.values():
+                        if u['id'] == otro_id:
+                            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False})
+                            ids_agregados.add(u['id'])
+
     emit('contactos_cargados', lista)
 
 @socketio.on('guardar_contacto')
@@ -560,7 +655,29 @@ def guardar_contacto(data):
                 guardar_json(USUARIOS_FILE, usuarios)
             break
     
-    # Recargar contactos
+    obtener_contactos({'id': mi_id})
+
+@socketio.on('eliminar_contacto')
+def eliminar_contacto(data):
+    usuarios = cargar_json(USUARIOS_FILE)
+    chats = cargar_json(CHATS_FILE)
+    mi_id = data['mi_id']
+    contacto_id = data['contacto_id']
+
+    # Quitar de la lista de contactos permanentes
+    for u in usuarios.values():
+        if u['id'] == mi_id and 'contactos' in u:
+            if contacto_id in u['contactos']:
+                u['contactos'].remove(contacto_id)
+                guardar_json(USUARIOS_FILE, usuarios)
+            break
+
+    # Borrar el historial de chat si existe
+    clave = "_".join(sorted([mi_id, contacto_id]))
+    if clave in chats:
+        del chats[clave]
+        guardar_json(CHATS_FILE, chats)
+
     obtener_contactos({'id': mi_id})
 
 @socketio.on('cargar_historial')
@@ -589,7 +706,6 @@ def manejar_mensaje(data):
     chats[clave].append(nuevo_msg)
     guardar_json(CHATS_FILE, chats)
     
-    # Emitir el mensaje a la sala del emisor y a la del receptor en tiempo real
     emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
     emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
 
