@@ -7,7 +7,6 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
-# Aumentamos el límite de tamaño de envío a 10MB para que el ordenador Asus no falle al subir fotos
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
 
 DB_NAME = 'arxechat.db'
@@ -39,6 +38,22 @@ def init_db():
             )
         ''')
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS grupos (
+                id TEXT PRIMARY KEY,
+                nombre TEXT,
+                foto TEXT,
+                creador_id TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS miembros_grupo (
+                grupo_id TEXT,
+                usuario_id TEXT,
+                aceptado INTEGER DEFAULT 0,
+                PRIMARY KEY (grupo_id, usuario_id)
+            )
+        ''')
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS mensajes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 clave_chat TEXT,
@@ -47,6 +62,7 @@ def init_db():
                 texto TEXT,
                 nombreEmisor TEXT,
                 fotoEmisor TEXT,
+                es_grupo INTEGER DEFAULT 0,
                 fecha DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -138,9 +154,16 @@ HTML_LAYOUT = """
         .chat-bg-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background-size: cover; background-position: center; z-index: 0; pointer-events: none; }
         .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1; }
         
-        .message { max-width: 65%; padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); }
-        .message.received { background: var(--msg-recv); align-self: flex-start; border-top-left-radius: 0; }
-        .message.sent { background: var(--msg-sent); align-self: flex-end; border-top-right-radius: 0; }
+        .msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 75%; }
+        .msg-row.sent { align-self: flex-end; flex-direction: row-reverse; }
+        .msg-row.received { align-self: flex-start; }
+        
+        .msg-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-size: 0.75rem; color: white; font-weight: bold; }
+        
+        .message { padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); position: relative; width: 100%; }
+        .message.received { background: var(--msg-recv); border-top-left-radius: 0; }
+        .message.sent { background: var(--msg-sent); border-top-right-radius: 0; }
+        .message .sender-name { font-size: 0.75rem; font-weight: bold; color: var(--accent); margin-bottom: 3px; display: block; }
         .message a { color: var(--link-color); text-decoration: underline; word-break: break-all; }
 
         .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
@@ -174,6 +197,39 @@ HTML_LAYOUT = """
             <div class="auth-toggle" onclick="toggleAuthMode()">
                 <span id="toggleText">¿Aún no tienes cuenta? Regístrate</span>
             </div>
+        </div>
+    </div>
+
+    <!-- MODAL DE ELECCIÓN: PERSONA O GRUPO -->
+    <div class="modal-overlay" id="addChoiceModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarModalChoice()">&times;</span>
+            <h2>¿Qué deseas añadir?</h2>
+            <button type="button" class="btn-action" onclick="abrirModalPersona()">Añadir Persona</button>
+            <button type="button" class="btn-action" style="background: #202c33; border: 1px solid var(--accent); color: var(--accent);" onclick="abrirModalGrupo()">Crear Grupo</button>
+        </div>
+    </div>
+
+    <!-- MODAL AÑADIR PERSONA -->
+    <div class="modal-overlay" id="addPersonModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarModalPersona()">&times;</span>
+            <h2>Añadir Persona</h2>
+            <input type="text" id="personIdInput" placeholder="ID de 8 dígitos de la persona">
+            <button type="button" class="btn-action" onclick="confirmarAgregarPersona()">Añadir Contacto</button>
+        </div>
+    </div>
+
+    <!-- MODAL CREAR GRUPO -->
+    <div class="modal-overlay" id="addGroupModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarModalGrupo()">&times;</span>
+            <h2>Crear Grupo</h2>
+            <input type="text" id="groupNameInput" placeholder="Nombre del grupo">
+            <label class="file-label">Foto del grupo (Opcional):</label>
+            <input type="file" id="groupFotoInput" accept="image/*">
+            <input type="text" id="groupMembersInput" placeholder="IDs de los miembros (separados por comas)">
+            <button type="button" class="btn-action" id="btnCrearGrupo" onclick="confirmarCrearGrupo()">Crear Grupo</button>
         </div>
     </div>
 
@@ -222,7 +278,7 @@ HTML_LAYOUT = """
                         <div id="myID" style="font-size:0.75rem; color: var(--accent);">ID: --------</div>
                     </div>
                 </button>
-                <button type="button" class="add-btn" onclick="agregarContacto()" title="Añadir contacto">+</button>
+                <button type="button" class="add-btn" onclick="abrirModalChoice()" title="Añadir algo">+</button>
             </div>
             <div class="contacts-list" id="contactsList"></div>
         </div>
@@ -230,7 +286,7 @@ HTML_LAYOUT = """
         <div class="chat-area" id="chatArea">
             <div class="empty-state" id="emptyState">
                 <h3>Arxechat para Web</h3>
-                <p>Aún no tienes contactos o no has seleccionado ninguno.<br>Pulsa el botón <b>+</b> arriba a la izquierda e introduce su ID de 8 dígitos para chatear.</p>
+                <p>Aún no tienes chats o no has seleccionado ninguno.<br>Pulsa el botón <b>+</b> arriba a la izquierda para añadir personas o crear grupos.</p>
             </div>
 
             <div class="active-chat-container" id="activeChatContainer">
@@ -239,12 +295,12 @@ HTML_LAYOUT = """
                         <img id="activeAvatarImg" class="user-avatar" style="display:none;">
                         <div id="activeAvatarText" class="user-avatar">?</div>
                         <div>
-                            <div id="activeName" class="contact-name">Contacto</div>
+                            <div id="activeName" class="contact-name">Contacto / Grupo</div>
                             <div id="activeStatus" style="font-size:0.8rem; color: var(--text-sub);">En línea</div>
                         </div>
-                        <button type="button" id="btnAddContactBanner" class="add-contact-banner" style="display:none;" onclick="guardarContactoTemporal()">+ Añadir a contactos</button>
+                        <button type="button" id="btnAddContactBanner" class="add-contact-banner" style="display:none;" onclick="guardarContactoOAceptarGrupo()"></button>
                     </div>
-                    <button type="button" class="chat-menu-btn" onclick="eliminarChat()" title="Eliminar Chat">&#8285;</button>
+                    <button type="button" class="chat-menu-btn" onclick="eliminarChat()" title="Eliminar Chat / Salir del Grupo">&#8285;</button>
                 </div>
                 
                 <div class="chat-messages-wrapper">
@@ -306,7 +362,6 @@ HTML_LAYOUT = """
             document.getElementById('errorMsg').style.display = 'none';
         }
 
-        // Función para comprimir imágenes y evitar que falle en el ASUS
         function convertAndCompressBase64(file) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
@@ -318,7 +373,7 @@ HTML_LAYOUT = """
                         const canvas = document.createElement('canvas');
                         let width = img.width;
                         let height = img.height;
-                        const maxDim = 800; // Redimensionar si es muy grande
+                        const maxDim = 800;
                         if (width > maxDim || height > maxDim) {
                             if (width > height) {
                                 height = Math.round((height * maxDim) / width);
@@ -332,7 +387,7 @@ HTML_LAYOUT = """
                         canvas.height = height;
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
-                        resolve(canvas.toDataURL('image/jpeg', 0.7)); // Compresión suave a JPG
+                        resolve(canvas.toDataURL('image/jpeg', 0.7));
                     };
                 };
             });
@@ -371,7 +426,6 @@ HTML_LAYOUT = """
                 if(isRegister) alert("¡Cuenta creada! Tu ID es: " + miUsuario.id);
                 iniciarApp();
             } else {
-                // Si Render reinició el servidor, auto-registramos al usuario local para recuperar su sesión sin perder nada
                 if(miUsuario && !isRegister) {
                     socket.emit('registrar_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass, foto: miUsuario.foto });
                 } else {
@@ -414,6 +468,76 @@ HTML_LAYOUT = """
             alert("¡ID copiado al portapapeles!: " + miUsuario.id);
         }
 
+        // CONTROL DE MODALES DE AÑADIR
+        function abrirModalChoice() { document.getElementById('addChoiceModal').style.display = 'flex'; }
+        function cerrarModalChoice() { document.getElementById('addChoiceModal').style.display = 'none'; }
+        
+        function abrirModalPersona() {
+            cerrarModalChoice();
+            document.getElementById('addPersonModal').style.display = 'flex';
+        }
+        function cerrarModalPersona() { document.getElementById('addPersonModal').style.display = 'none'; }
+
+        function abrirModalGrupo() {
+            cerrarModalChoice();
+            document.getElementById('addGroupModal').style.display = 'flex';
+        }
+        function cerrarModalGrupo() { document.getElementById('addGroupModal').style.display = 'none'; }
+
+        function confirmarAgregarPersona() {
+            const idContacto = document.getElementById('personIdInput').value.trim();
+            if(idContacto && idContacto.length === 8) {
+                if(idContacto === miUsuario.id) return alert("No puedes añadirte a ti mismo.");
+                socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: idContacto });
+                cerrarModalPersona();
+                document.getElementById('personIdInput').value = '';
+            } else {
+                alert("El ID debe tener exactamente 8 dígitos.");
+            }
+        }
+
+        async function confirmarCrearGrupo() {
+            const nombre = document.getElementById('groupNameInput').value.trim();
+            const rawMembers = document.getElementById('groupMembersInput').value.trim();
+            if(!nombre) return alert("Introduce un nombre para el grupo.");
+            
+            const btn = document.getElementById('btnCrearGrupo');
+            btn.innerText = "Creando...";
+            btn.disabled = true;
+
+            let fotoBase64 = null;
+            const fileInput = document.getElementById('groupFotoInput');
+            if(fileInput.files.length > 0) {
+                fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
+            }
+
+            const miembros = rawMembers.split(',').map(m => m.trim()).filter(m => m.length === 8);
+            miembros.push(miUsuario.id);
+
+            socket.emit('crear_grupo', {
+                nombre: nombre,
+                foto: fotoBase64,
+                creador_id: miUsuario.id,
+                miembros: miembros
+            });
+        }
+
+        socket.on('grupo_creado_resultado', (res) => {
+            const btn = document.getElementById('btnCrearGrupo');
+            btn.innerText = "Crear Grupo";
+            btn.disabled = false;
+
+            if(res.exito) {
+                alert("¡Grupo creado con éxito!");
+                cerrarModalGrupo();
+                document.getElementById('groupNameInput').value = '';
+                document.getElementById('groupMembersInput').value = '';
+                socket.emit('obtener_contactos', { id: miUsuario.id });
+            } else {
+                alert(res.mensaje);
+            }
+        });
+
         function abrirAjustes() {
             document.getElementById('editName').value = miUsuario.nombre;
             document.getElementById('editTheme').value = miUsuario.tema || 'dark';
@@ -423,9 +547,7 @@ HTML_LAYOUT = """
             document.getElementById('settingsModal').style.display = 'flex';
         }
 
-        function cerrarAjustes() {
-            document.getElementById('settingsModal').style.display = 'none';
-        }
+        function cerrarAjustes() { document.getElementById('settingsModal').style.display = 'none'; }
 
         async function guardarAjustes() {
             const btn = document.getElementById('btnGuardarAjustes');
@@ -481,21 +603,12 @@ HTML_LAYOUT = """
             location.reload();
         }
 
-        function agregarContacto() {
-            const idContacto = prompt("Introduce el ID de 8 dígitos de la persona:");
-            if(idContacto && idContacto.length === 8) {
-                if(idContacto === miUsuario.id) return alert("No puedes añadirte a ti mismo.");
-                socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: idContacto });
-            } else if(idContacto) {
-                alert("El ID debe tener exactamente 8 dígitos.");
-            }
-        }
-
         socket.on('contacto_resultado', (res) => {
             if(!res.exito) {
                 alert(res.mensaje);
             } else {
                 alert("Contacto añadido correctamente.");
+                socket.emit('obtener_contactos', { id: miUsuario.id });
             }
         });
 
@@ -511,57 +624,85 @@ HTML_LAYOUT = """
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'contact-item';
-                btn.onclick = () => seleccionarContacto(c.id, c.nombre, c.foto, c.esGuardado);
+                btn.onclick = () => seleccionarContacto(c);
                 
                 const avatarHtml = c.foto ? `<img src="${c.foto}" class="user-avatar">` : `<div class="user-avatar">${c.nombre.charAt(0).toUpperCase()}</div>`;
+                
+                let etiqueta = '';
+                if (c.esGrupo) {
+                    etiqueta = c.esGuardado ? '<span style="font-size:0.75rem; color:var(--accent);">(Grupo)</span>' : '<span style="font-size:0.75rem; color:#ea4335;">[Aceptar Grupo]</span>';
+                } else {
+                    etiqueta = c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>';
+                }
+
                 btn.innerHTML = `
                     ${avatarHtml}
                     <div class="contact-info">
-                        <div class="contact-name">${c.nombre} ${c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>'}</div>
-                        <div class="contact-id">ID: ${c.id}</div>
+                        <div class="contact-name">${c.nombre} ${etiqueta}</div>
+                        <div class="contact-id">${c.esGrupo ? 'Grupo' : 'ID: ' + c.id}</div>
                     </div>
                 `;
                 listaDiv.appendChild(btn);
             });
         }
 
-        function seleccionarContacto(id, nombre, foto, esGuardado = true) {
-            contactoActivo = { id, nombre, foto, esGuardado };
+        function seleccionarContacto(c) {
+            contactoActivo = c;
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('activeChatContainer').style.display = 'flex';
-            document.getElementById('activeName').innerText = nombre;
+            document.getElementById('activeName').innerText = c.nombre;
+            document.getElementById('activeStatus').innerText = c.esGrupo ? "Grupo de chat" : "En línea";
             
             if(window.innerWidth <= 768) {
                 document.getElementById('chatArea').classList.add('active-mobile');
             }
 
-            document.getElementById('btnAddContactBanner').style.display = esGuardado ? 'none' : 'inline-block';
+            const bannerBtn = document.getElementById('btnAddContactBanner');
+            if(!c.esGuardado) {
+                bannerBtn.style.display = 'inline-block';
+                bannerBtn.innerText = c.esGrupo ? "Aceptar Grupo" : "+ Añadir a contactos";
+            } else {
+                bannerBtn.style.display = 'none';
+            }
 
-            if(foto) {
-                document.getElementById('activeAvatarImg').src = foto;
+            if(c.foto) {
+                document.getElementById('activeAvatarImg').src = c.foto;
                 document.getElementById('activeAvatarImg').style.display = 'block';
                 document.getElementById('activeAvatarText').style.display = 'none';
             } else {
                 document.getElementById('activeAvatarImg').style.display = 'none';
                 document.getElementById('activeAvatarText').style.display = 'flex';
-                document.getElementById('activeAvatarText').innerText = nombre.charAt(0).toUpperCase();
+                document.getElementById('activeAvatarText').innerText = c.nombre.charAt(0).toUpperCase();
             }
             
             document.getElementById('messages').innerHTML = '';
-            socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: id });
+            socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: c.id, esGrupo: c.esGrupo });
         }
 
-        function guardarContactoTemporal() {
+        function guardarContactoOAceptarGrupo() {
             if(contactoActivo) {
-                socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
+                if(contactoActivo.esGrupo) {
+                    socket.emit('aceptar_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
+                } else {
+                    socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
+                }
                 contactoActivo.esGuardado = true;
                 document.getElementById('btnAddContactBanner').style.display = 'none';
             }
         }
 
+        socket.on('grupo_aceptado', () => {
+            alert("¡Grupo guardado en tu cuenta!");
+            socket.emit('obtener_contactos', { id: miUsuario.id });
+        });
+
         function eliminarChat() {
-            if(contactoActivo && confirm("¿Quieres borrar este contacto y su conversación?")) {
-                socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
+            if(contactoActivo && confirm(contactoActivo.esGrupo ? "¿Quieres salir de este grupo?" : "¿Quieres borrar este contacto y su conversación?")) {
+                if(contactoActivo.esGrupo) {
+                    socket.emit('salir_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
+                } else {
+                    socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
+                }
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
                 document.getElementById('emptyState').style.display = 'flex';
@@ -578,30 +719,48 @@ HTML_LAYOUT = """
             });
         }
 
+        function renderizarMensaje(msg) {
+            const messagesDiv = document.getElementById('messages');
+            const esMio = msg.emisor === miUsuario.id;
+            
+            const rowDiv = document.createElement('div');
+            rowDiv.className = `msg-row ${esMio ? 'sent' : 'received'}`;
+
+            let avatarHtml = '';
+            if(!esMio && contactoActivo.esGrupo) {
+                avatarHtml = msg.fotoEmisor 
+                    ? `<img src="${msg.fotoEmisor}" class="msg-avatar">`
+                    : `<div class="msg-avatar">${(msg.nombreEmisor || '?').charAt(0).toUpperCase()}</div>`;
+            }
+
+            const msgElement = document.createElement('div');
+            msgElement.className = `message ${esMio ? 'sent' : 'received'}`;
+
+            let senderHeader = '';
+            if(!esMio && contactoActivo.esGrupo) {
+                senderHeader = `<span class="sender-name">${msg.nombreEmisor || 'Usuario'}</span>`;
+            }
+
+            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}`;
+            
+            rowDiv.innerHTML = avatarHtml;
+            rowDiv.appendChild(msgElement);
+
+            messagesDiv.appendChild(rowDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
         socket.on('historial_cargado', (mensajes) => {
             const messagesDiv = document.getElementById('messages');
             messagesDiv.innerHTML = '';
-            mensajes.forEach(msg => {
-                const msgElement = document.createElement('div');
-                msgElement.classList.add('message');
-                msgElement.classList.add(msg.emisor === miUsuario.id ? 'sent' : 'received');
-                msgElement.innerHTML = formatearTextoConLinks(msg.texto);
-                messagesDiv.appendChild(msgElement);
-            });
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            mensajes.forEach(msg => renderizarMensaje(msg));
         });
 
         socket.on('recibir_mensaje', (data) => {
             socket.emit('obtener_contactos', { id: miUsuario.id });
 
-            if(contactoActivo && (data.emisor === contactoActivo.id || data.emisor === miUsuario.id)) {
-                const messagesDiv = document.getElementById('messages');
-                const msgElement = document.createElement('div');
-                msgElement.classList.add('message');
-                msgElement.classList.add(data.emisor === miUsuario.id ? 'sent' : 'received');
-                msgElement.innerHTML = formatearTextoConLinks(data.texto);
-                messagesDiv.appendChild(msgElement);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            if(contactoActivo && (data.clave_chat === contactoActivo.id || data.emisor === contactoActivo.id || data.receptor === miUsuario.id)) {
+                renderizarMensaje(data);
             }
 
             if (data.emisor !== miUsuario.id && document.hidden && Notification.permission === "granted") {
@@ -618,6 +777,7 @@ HTML_LAYOUT = """
                     nombreEmisor: miUsuario.nombre,
                     fotoEmisor: miUsuario.foto,
                     receptor: contactoActivo.id,
+                    esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto
                 });
                 input.value = '';
@@ -640,6 +800,13 @@ def home():
 def conectar(data):
     from flask_socketio import join_room
     join_room(data['id'])
+    
+    # Unirse a las salas de todos los grupos del usuario
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = ?", (data['id'],))
+        for r in cursor.fetchall():
+            join_room(r['grupo_id'])
 
 @socketio.on('registrar_usuario')
 def registrar(data):
@@ -713,6 +880,51 @@ def actualizar_perfil(data):
         u_updated = dict(cursor.fetchone())
         emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
 
+@socketio.on('crear_grupo')
+def crear_grupo(data):
+    from flask_socketio import join_room
+    grupo_id = "GRP_" + str(random.randint(10000000, 99999999))
+    nombre = data['nombre']
+    foto = data.get('foto')
+    creador_id = data['creador_id']
+    miembros = list(set(data.get('miembros', [])))
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (?, ?, ?, ?)",
+                       (grupo_id, nombre, foto, creador_id))
+        
+        for m_id in miembros:
+            cursor.execute("SELECT id FROM usuarios WHERE id = ?", (m_id,))
+            if cursor.fetchone():
+                aceptado = 1 if m_id == creador_id else 0
+                cursor.execute("INSERT OR IGNORE INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (?, ?, ?)",
+                               (grupo_id, m_id, aceptado))
+        conn.commit()
+
+    join_room(grupo_id)
+    emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
+
+@socketio.on('aceptar_grupo')
+def aceptar_grupo(data):
+    from flask_socketio import join_room
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = ? AND usuario_id = ?",
+                       (data['grupo_id'], data['usuario_id']))
+        conn.commit()
+    join_room(data['grupo_id'])
+    emit('grupo_aceptado', {'grupo_id': data['grupo_id']})
+
+@socketio.on('salir_grupo')
+def salir_grupo(data):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ? AND usuario_id = ?",
+                       (data['grupo_id'], data['usuario_id']))
+        conn.commit()
+    obtener_contactos({'id': data['usuario_id']})
+
 @socketio.on('obtener_contactos')
 def obtener_contactos(data):
     mi_id = data['id']
@@ -722,6 +934,7 @@ def obtener_contactos(data):
     with get_db() as conn:
         cursor = conn.cursor()
         
+        # 1. Traer contactos directos
         cursor.execute("""
             SELECT u.id, u.nombre, u.foto 
             FROM contactos c 
@@ -729,13 +942,14 @@ def obtener_contactos(data):
             WHERE c.mi_id = ?
         """, (mi_id,))
         for r in cursor.fetchall():
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True})
+            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False})
             ids_agregados.add(r['id'])
 
+        # 2. Traer chats pendientes directos
         cursor.execute("""
             SELECT DISTINCT emisor, receptor 
             FROM mensajes 
-            WHERE emisor = ? OR receptor = ?
+            WHERE (emisor = ? OR receptor = ?) AND es_grupo = 0
         """, (mi_id, mi_id))
         
         for r in cursor.fetchall():
@@ -744,8 +958,18 @@ def obtener_contactos(data):
                 cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ?", (otro_id,))
                 u = cursor.fetchone()
                 if u:
-                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False})
+                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False})
                     ids_agregados.add(u['id'])
+
+        # 3. Traer Grupos
+        cursor.execute("""
+            SELECT g.id, g.nombre, g.foto, mg.aceptado 
+            FROM miembros_grupo mg 
+            JOIN grupos g ON mg.grupo_id = g.id 
+            WHERE mg.usuario_id = ?
+        """, (mi_id,))
+        for r in cursor.fetchall():
+            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True})
 
     emit('contactos_cargados', lista)
 
@@ -765,7 +989,6 @@ def guardar_contacto(data):
         conn.commit()
 
     emit('contacto_resultado', {'exito': True, 'mensaje': 'Contacto añadido.'})
-    obtener_contactos({'id': mi_id})
 
 @socketio.on('eliminar_contacto')
 def eliminar_contacto(data):
@@ -777,14 +1000,16 @@ def eliminar_contacto(data):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM contactos WHERE mi_id = ? AND contacto_id = ?", (mi_id, contacto_id))
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ?", (clave_chat,))
+        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 0", (clave_chat,))
         conn.commit()
 
     obtener_contactos({'id': mi_id})
 
 @socketio.on('cargar_historial')
 def cargar_historial(data):
-    clave_chat = "_".join(sorted([data['emisor'], data['receptor']]))
+    es_grupo = data.get('esGrupo', False)
+    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
+    
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = ? ORDER BY fecha ASC", (clave_chat,))
@@ -794,26 +1019,32 @@ def cargar_historial(data):
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
-    clave_chat = "_".join(sorted([data['emisor'], data['receptor']]))
+    es_grupo = data.get('esGrupo', 0)
+    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
     
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor')))
+            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
         conn.commit()
 
     nuevo_msg = {
+        'clave_chat': clave_chat,
         'emisor': data['emisor'],
         'receptor': data['receptor'],
         'texto': data['texto'],
         'nombreEmisor': data['nombreEmisor'],
-        'fotoEmisor': data.get('fotoEmisor')
+        'fotoEmisor': data.get('fotoEmisor'),
+        'esGrupo': es_grupo
     }
 
-    emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
-    emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+    if es_grupo:
+        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+    else:
+        emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
+        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
