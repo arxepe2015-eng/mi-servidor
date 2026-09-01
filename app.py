@@ -1,5 +1,5 @@
 import os
-import json
+import sqlite3
 import random
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
@@ -9,23 +9,52 @@ app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-USUARIOS_FILE = 'usuarios.json'
-CHATS_FILE = 'chats.json'
+DB_NAME = 'arxechat.db'
 
-def cargar_json(archivo):
-    if not os.path.exists(archivo):
-        with open(archivo, 'w', encoding='utf-8') as f:
-            json.dump({}, f)
-        return {}
-    try:
-        with open(archivo, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def guardar_json(archivo, datos):
-    with open(archivo, 'w', encoding='utf-8') as f:
-        json.dump(datos, f, ensure_ascii=False, indent=2)
+def init_db():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Tabla de usuarios
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id TEXT PRIMARY KEY,
+                nombre TEXT UNIQUE,
+                pass TEXT,
+                foto TEXT,
+                fondoChat TEXT,
+                tema TEXT DEFAULT 'dark',
+                brilloFondo INTEGER DEFAULT 100
+            )
+        ''')
+        # Tabla de contactos
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS contactos (
+                mi_id TEXT,
+                contacto_id TEXT,
+                PRIMARY KEY (mi_id, contacto_id)
+            )
+        ''')
+        # Tabla de mensajes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS mensajes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clave_chat TEXT,
+                emisor TEXT,
+                receptor TEXT,
+                texto TEXT,
+                nombreEmisor TEXT,
+                fotoEmisor TEXT,
+                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
+init_db()
 
 HTML_LAYOUT = """
 <!DOCTYPE html>
@@ -72,7 +101,6 @@ HTML_LAYOUT = """
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
         .modal-box h2 { margin-bottom: 15px; color: var(--accent); }
         .modal-box input, .modal-box select { width: 100%; padding: 12px; margin: 8px 0; background: var(--bg-input); border: 1px solid transparent; border-radius: 6px; color: var(--text-main); outline: none; font-size: 1rem; }
-        .modal-box input.input-error { border: 2px solid #ea4335 !important; }
         .file-label { display: block; text-align: left; font-size: 0.85rem; color: var(--text-sub); margin-top: 10px; }
         .modal-box button, .btn-action { width: 100%; padding: 12px; background: var(--accent); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; margin-top: 10px; font-size: 1rem; }
         .btn-copy { background: var(--bg-header); border: 1px solid var(--accent); color: var(--accent); }
@@ -81,6 +109,10 @@ HTML_LAYOUT = """
         .auth-toggle span { color: var(--accent); text-decoration: underline; }
         .error-msg { color: #ea4335; font-size: 0.85rem; margin-top: 5px; display: none; }
         .close-btn { position: absolute; top: 10px; right: 15px; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; }
+
+        /* Slider para brillo */
+        .slider-container { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
+        .slider-container input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
 
         /* Contenedor Principal */
         .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
@@ -110,13 +142,16 @@ HTML_LAYOUT = """
         .add-contact-banner { background: var(--accent); color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: bold; cursor: pointer; margin-left: 10px; }
         .chat-menu-btn { background: none; border: none; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
         
-        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; background-size: cover; background-position: center; }
+        .chat-messages-wrapper { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+        .chat-bg-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background-size: cover; background-position: center; z-index: 0; pointer-events: none; }
+        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1; }
+        
         .message { max-width: 65%; padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); }
         .message.received { background: var(--msg-recv); align-self: flex-start; border-top-left-radius: 0; }
         .message.sent { background: var(--msg-sent); align-self: flex-end; border-top-right-radius: 0; }
         .message a { color: var(--link-color); text-decoration: underline; word-break: break-all; }
 
-        .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; }
+        .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
         .chat-input-area input { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
         .chat-input-area button { background: var(--accent); border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
         
@@ -176,6 +211,11 @@ HTML_LAYOUT = """
             <label class="file-label">Cambiar fondo de chat:</label>
             <input type="file" id="editFondoChat" accept="image/*">
 
+            <label class="file-label">Brillo / Intensidad del Fondo (<span id="brilloVal">100</span>%):</label>
+            <div class="slider-container">
+                <input type="range" id="editBrillo" min="10" max="100" value="100" oninput="document.getElementById('brilloVal').innerText = this.value">
+            </div>
+
             <button type="button" class="btn-action" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
         </div>
@@ -219,7 +259,12 @@ HTML_LAYOUT = """
                     </div>
                     <button type="button" class="chat-menu-btn" onclick="eliminarChat()" title="Eliminar Chat">&#8285;</button>
                 </div>
-                <div class="chat-messages" id="messages"></div>
+                
+                <div class="chat-messages-wrapper">
+                    <div class="chat-bg-overlay" id="chatBgOverlay"></div>
+                    <div class="chat-messages" id="messages"></div>
+                </div>
+
                 <div class="chat-input-area">
                     <input type="text" id="messageInput" placeholder="Escribe un mensaje..." autocomplete="off">
                     <button type="button" onclick="sendMessage()">Enviar</button>
@@ -239,7 +284,8 @@ HTML_LAYOUT = """
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
             if (sesionGuardada) {
                 miUsuario = JSON.parse(sesionGuardada);
-                iniciarApp();
+                // Validar credenciales guardadas con servidor
+                socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
             }
         };
 
@@ -250,11 +296,13 @@ HTML_LAYOUT = """
                 document.body.classList.remove('light-theme');
             }
 
-            const msgDiv = document.getElementById('messages');
+            const bgOverlay = document.getElementById('chatBgOverlay');
             if (miUsuario && miUsuario.fondoChat) {
-                msgDiv.style.backgroundImage = `url('${miUsuario.fondoChat}')`;
+                bgOverlay.style.backgroundImage = `url('${miUsuario.fondoChat}')`;
+                const opacidad = (miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100) / 100;
+                bgOverlay.style.opacity = opacidad;
             } else {
-                msgDiv.style.backgroundImage = 'none';
+                bgOverlay.style.backgroundImage = 'none';
             }
         }
 
@@ -269,8 +317,6 @@ HTML_LAYOUT = """
         }
 
         function limpiarErrores() {
-            document.getElementById('authPass').classList.remove('input-error');
-            document.getElementById('authPassConfirm').classList.remove('input-error');
             document.getElementById('errorMsg').style.display = 'none';
         }
 
@@ -293,8 +339,6 @@ HTML_LAYOUT = """
             if(isRegister) {
                 const pass2 = document.getElementById('authPassConfirm').value;
                 if(pass !== pass2) {
-                    document.getElementById('authPass').classList.add('input-error');
-                    document.getElementById('authPassConfirm').classList.add('input-error');
                     document.getElementById('errorMsg').style.display = 'block';
                     return;
                 }
@@ -315,10 +359,13 @@ HTML_LAYOUT = """
             if (res.exito) {
                 miUsuario = res.usuario;
                 localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
-                if(isRegister) alert("¡Cuenta creada! Tu ID personal de 8 dígitos es: " + miUsuario.id);
+                if(isRegister) alert("¡Cuenta creada! Tu ID personal es: " + miUsuario.id);
                 iniciarApp();
             } else {
                 alert(res.mensaje);
+                localStorage.removeItem('arxechat_sesion');
+                document.getElementById('authModal').style.display = 'flex';
+                document.getElementById('appContainer').style.display = 'none';
             }
         });
 
@@ -335,6 +382,8 @@ HTML_LAYOUT = """
                 document.getElementById('myAvatarImg').style.display = 'block';
                 document.getElementById('myAvatarText').style.display = 'none';
             } else {
+                document.getElementById('myAvatarImg').style.display = 'none';
+                document.getElementById('myAvatarText').style.display = 'flex';
                 document.getElementById('myAvatarText').innerText = miUsuario.nombre.charAt(0).toUpperCase();
             }
 
@@ -354,6 +403,9 @@ HTML_LAYOUT = """
         function abrirAjustes() {
             document.getElementById('editName').value = miUsuario.nombre;
             document.getElementById('editTheme').value = miUsuario.tema || 'dark';
+            const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100;
+            document.getElementById('editBrillo').value = brillo;
+            document.getElementById('brilloVal').innerText = brillo;
             document.getElementById('settingsModal').style.display = 'flex';
         }
 
@@ -365,6 +417,7 @@ HTML_LAYOUT = """
             const nuevoNombre = document.getElementById('editName').value.trim();
             const nuevaPass = document.getElementById('editPass').value;
             const nuevoTema = document.getElementById('editTheme').value;
+            const nuevoBrillo = parseInt(document.getElementById('editBrillo').value);
             
             const fileFoto = document.getElementById('editFoto');
             let nuevaFoto = miUsuario.foto;
@@ -384,7 +437,8 @@ HTML_LAYOUT = """
                 pass: nuevaPass, 
                 foto: nuevaFoto,
                 fondoChat: nuevoFondo,
-                tema: nuevoTema
+                tema: nuevoTema,
+                brilloFondo: nuevoBrillo
             });
         }
 
@@ -392,8 +446,11 @@ HTML_LAYOUT = """
             if(res.exito) {
                 miUsuario = res.usuario;
                 localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
-                alert("Ajustes guardados correctamente");
-                location.reload();
+                alert("¡Ajustes guardados correctamente!");
+                cerrarAjustes();
+                iniciarApp();
+            } else {
+                alert(res.mensaje);
             }
         });
 
@@ -411,6 +468,14 @@ HTML_LAYOUT = """
                 alert("El ID debe tener exactamente 8 dígitos.");
             }
         }
+
+        socket.on('contacto_resultado', (res) => {
+            if(!res.exito) {
+                alert(res.mensaje);
+            } else {
+                alert("Contacto añadido correctamente.");
+            }
+        });
 
         socket.on('contactos_cargados', (lista) => {
             misContactos = lista;
@@ -505,7 +570,6 @@ HTML_LAYOUT = """
         });
 
         socket.on('recibir_mensaje', (data) => {
-            // Recargar lista si es un mensaje de una persona nueva
             socket.emit('obtener_contactos', { id: miUsuario.id });
 
             if(contactoActivo && (data.emisor === contactoActivo.id || data.emisor === miUsuario.id)) {
@@ -557,144 +621,167 @@ def conectar(data):
 
 @socketio.on('registrar_usuario')
 def registrar(data):
-    usuarios = cargar_json(USUARIOS_FILE)
     nombre = data['nombre']
-    
-    if nombre in usuarios:
-        emit('auth_resultado', {'exito': False, 'mensaje': 'El nombre de usuario ya existe.'})
-        return
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (nombre,))
+        if cursor.fetchone():
+            emit('auth_resultado', {'exito': False, 'mensaje': 'El nombre de usuario ya existe.'})
+            return
 
-    nuevo_id = str(random.randint(10000000, 99999999))
-    nuevo_usuario = {
-        'id': nuevo_id,
-        'nombre': nombre,
-        'pass': data['pass'],
-        'foto': data.get('foto'),
-        'fondoChat': None,
-        'tema': 'dark',
-        'contactos': []
-    }
-    
-    usuarios[nombre] = nuevo_usuario
-    guardar_json(USUARIOS_FILE, usuarios)
-    emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
+        nuevo_id = str(random.randint(10000000, 99999999))
+        cursor.execute(
+            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
+        )
+        conn.commit()
+        
+        nuevo_usuario = {
+            'id': nuevo_id,
+            'nombre': nombre,
+            'pass': data['pass'],
+            'foto': data.get('foto'),
+            'fondoChat': None,
+            'tema': 'dark',
+            'brilloFondo': 100
+        }
+        emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
 
 @socketio.on('login_usuario')
 def login(data):
-    usuarios = cargar_json(USUARIOS_FILE)
     nombre = data['nombre']
-    
-    if nombre in usuarios and usuarios[nombre]['pass'] == data['pass']:
-        emit('auth_resultado', {'exito': True, 'usuario': usuarios[nombre]})
-    else:
-        emit('auth_resultado', {'exito': False, 'mensaje': 'La cuenta no existe o la contraseña es incorrecta.'})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM usuarios WHERE nombre = ?", (nombre,))
+        row = cursor.fetchone()
+        
+        if row and row['pass'] == data['pass']:
+            usuario = dict(row)
+            emit('auth_resultado', {'exito': True, 'usuario': usuario})
+        else:
+            emit('auth_resultado', {'exito': False, 'mensaje': 'La cuenta no existe o la contraseña es incorrecta.'})
 
 @socketio.on('actualizar_perfil')
 def actualizar_perfil(data):
-    usuarios = cargar_json(USUARIOS_FILE)
-    for nombre, u in usuarios.items():
-        if u['id'] == data['id']:
-            u['nombre'] = data['nombre']
-            if data['pass']:
-                u['pass'] = data['pass']
-            u['foto'] = data['foto']
-            u['fondoChat'] = data.get('fondoChat')
-            u['tema'] = data.get('tema', 'dark')
-            guardar_json(USUARIOS_FILE, usuarios)
-            emit('perfil_actualizado', {'exito': True, 'usuario': u})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (data['id'],))
+        row = cursor.fetchone()
+        if not row:
+            emit('perfil_actualizado', {'exito': False, 'mensaje': 'Usuario no encontrado.'})
             return
+
+        nuevo_nombre = data['nombre']
+        nueva_pass = data['pass'] if data['pass'] else row['pass']
+        nueva_foto = data['foto']
+        nuevo_fondo = data.get('fondoChat')
+        nuevo_tema = data.get('tema', 'dark')
+        nuevo_brillo = data.get('brilloFondo', 100)
+
+        cursor.execute("""
+            UPDATE usuarios 
+            SET nombre = ?, pass = ?, foto = ?, fondoChat = ?, tema = ?, brilloFondo = ? 
+            WHERE id = ?
+        """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
+        conn.commit()
+
+        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (data['id'],))
+        u_updated = dict(cursor.fetchone())
+        emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
 
 @socketio.on('obtener_contactos')
 def obtener_contactos(data):
-    usuarios = cargar_json(USUARIOS_FILE)
-    chats = cargar_json(CHATS_FILE)
     mi_id = data['id']
-    
-    mi_u = None
-    for u in usuarios.values():
-        if u['id'] == mi_id:
-            mi_u = u
-            break
-    
     lista = []
     ids_agregados = set()
-    
-    if mi_u:
-        # 1. Contactos permanentes guardados
-        for c_id in mi_u.get('contactos', []):
-            for u in usuarios.values():
-                if u['id'] == c_id:
-                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': True})
-                    ids_agregados.add(u['id'])
 
-        # 2. Contactos con historial de chat (contactos entrantes o temporales)
-        for clave in chats.keys():
-            partes = clave.split('_')
-            if mi_id in partes:
-                otro_id = partes[0] if partes[1] == mi_id else partes[1]
-                if otro_id not in ids_agregados:
-                    for u in usuarios.values():
-                        if u['id'] == otro_id:
-                            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False})
-                            ids_agregados.add(u['id'])
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # 1. Contactos permanentes guardados
+        cursor.execute("""
+            SELECT u.id, u.nombre, u.foto 
+            FROM contactos c 
+            JOIN usuarios u ON c.contacto_id = u.id 
+            WHERE c.mi_id = ?
+        """, (mi_id,))
+        for r in cursor.fetchall():
+            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True})
+            ids_agregados.add(r['id'])
+
+        # 2. Contactos temporales/entrantes desde mensajes
+        cursor.execute("""
+            SELECT DISTINCT emisor, receptor 
+            FROM mensajes 
+            WHERE emisor = ? OR receptor = ?
+        """, (mi_id, mi_id))
+        
+        for r in cursor.fetchall():
+            otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
+            if otro_id not in ids_agregados:
+                cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ?", (otro_id,))
+                u = cursor.fetchone()
+                if u:
+                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False})
+                    ids_agregados.add(u['id'])
 
     emit('contactos_cargados', lista)
 
 @socketio.on('guardar_contacto')
 def guardar_contacto(data):
-    usuarios = cargar_json(USUARIOS_FILE)
     mi_id = data['mi_id']
     contacto_id = data['contacto_id']
-    
-    for u in usuarios.values():
-        if u['id'] == mi_id:
-            if 'contactos' not in u:
-                u['contactos'] = []
-            if contacto_id not in u['contactos']:
-                u['contactos'].append(contacto_id)
-                guardar_json(USUARIOS_FILE, usuarios)
-            break
-    
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM usuarios WHERE id = ?", (contacto_id,))
+        if not cursor.fetchone():
+            emit('contacto_resultado', {'exito': False, 'mensaje': 'El ID introducido no existe.'})
+            return
+
+        cursor.execute("INSERT OR IGNORE INTO contactos (mi_id, contacto_id) VALUES (?, ?)", (mi_id, contacto_id))
+        conn.commit()
+
+    emit('contacto_resultado', {'exito': True, 'mensaje': 'Contacto añadido.'})
     obtener_contactos({'id': mi_id})
 
 @socketio.on('eliminar_contacto')
 def eliminar_contacto(data):
-    usuarios = cargar_json(USUARIOS_FILE)
-    chats = cargar_json(CHATS_FILE)
     mi_id = data['mi_id']
     contacto_id = data['contacto_id']
 
-    # Quitar de la lista de contactos permanentes
-    for u in usuarios.values():
-        if u['id'] == mi_id and 'contactos' in u:
-            if contacto_id in u['contactos']:
-                u['contactos'].remove(contacto_id)
-                guardar_json(USUARIOS_FILE, usuarios)
-            break
+    clave_chat = "_".join(sorted([mi_id, contacto_id]))
 
-    # Borrar el historial de chat si existe
-    clave = "_".join(sorted([mi_id, contacto_id]))
-    if clave in chats:
-        del chats[clave]
-        guardar_json(CHATS_FILE, chats)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM contactos WHERE mi_id = ? AND contacto_id = ?", (mi_id, contacto_id))
+        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ?", (clave_chat,))
+        conn.commit()
 
     obtener_contactos({'id': mi_id})
 
 @socketio.on('cargar_historial')
 def cargar_historial(data):
-    chats = cargar_json(CHATS_FILE)
-    clave = "_".join(sorted([data['emisor'], data['receptor']]))
-    historial = chats.get(clave, [])
+    clave_chat = "_".join(sorted([data['emisor'], data['receptor']]))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = ? ORDER BY fecha ASC", (clave_chat,))
+        historial = [dict(r) for r in cursor.fetchall()]
+
     emit('historial_cargado', historial)
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
-    chats = cargar_json(CHATS_FILE)
-    clave = "_".join(sorted([data['emisor'], data['receptor']]))
+    clave_chat = "_".join(sorted([data['emisor'], data['receptor']]))
     
-    if clave not in chats:
-        chats[clave] = []
-    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor')))
+        conn.commit()
+
     nuevo_msg = {
         'emisor': data['emisor'],
         'receptor': data['receptor'],
@@ -702,10 +789,7 @@ def manejar_mensaje(data):
         'nombreEmisor': data['nombreEmisor'],
         'fotoEmisor': data.get('fotoEmisor')
     }
-    
-    chats[clave].append(nuevo_msg)
-    guardar_json(CHATS_FILE, chats)
-    
+
     emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
     emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
 
