@@ -1,1522 +1,904 @@
 import os
 import json
 import random
+import uuid
+from datetime import datetime
+
 import psycopg2
 import psycopg2.extras
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 from pywebpush import webpush, WebPushException
 
 app = Flask(__name__)
-# La SECRET_KEY se lee de una variable de entorno en producción (Render).
-# Si no existe (p.ej. en local), se usa un valor de repuesto solo para pruebas.
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'arxechat_clave_secreta_123_dev')
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "arxechat_dev_change_me")
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="threading",
+    max_http_buffer_size=50 * 1024 * 1024,
+)
 
-# --- BASE DE DATOS PERSISTENTE (PostgreSQL) ---
-# En Render (plan gratuito) el disco es efímero: cualquier archivo local
-# (como un .db de SQLite) se borra en cada reinicio/despliegue.
-# Por eso los datos se guardan ahora en una base de datos PostgreSQL externa,
-# indicada mediante la variable de entorno DATABASE_URL (p.ej. de Neon, Supabase o Render Postgres).
-DATABASE_URL = os.environ.get('DATABASE_URL')
+DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
-    raise RuntimeError(
-        "Falta la variable de entorno DATABASE_URL. Añádela en Render con la cadena de "
-        "conexión de tu base de datos PostgreSQL (ver instrucciones adjuntas)."
-    )
+    raise RuntimeError("Falta DATABASE_URL en las variables de entorno de Render.")
 
-# Render Postgres / algunos proveedores dan la URL como postgres:// en vez de postgresql://
-if DATABASE_URL.startswith('postgres://'):
-    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# --- CLAVES VAPID PARA NOTIFICACIONES PUSH ---
-VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '')
-VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
-VAPID_CLAIMS_EMAIL = os.environ.get('VAPID_CLAIMS_EMAIL', 'mailto:admin@example.com')
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
+VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:admin@example.com")
+
+MAX_FILE_BYTES = 20 * 1024 * 1024
 
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=psycopg2.extras.RealDictCursor)
-    return conn
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode="require",
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=15,
+    )
 
 
 def init_db():
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
+        cur = conn.cursor()
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id TEXT PRIMARY KEY,
-                nombre TEXT UNIQUE,
-                pass TEXT,
+                nombre TEXT UNIQUE NOT NULL,
+                pass TEXT NOT NULL,
                 foto TEXT,
                 fondoChat TEXT,
                 tema TEXT DEFAULT 'dark',
                 brilloFondo INTEGER DEFAULT 100
             )
-        ''')
-        cursor.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS contactos (
-                mi_id TEXT,
-                contacto_id TEXT,
+                mi_id TEXT NOT NULL,
+                contacto_id TEXT NOT NULL,
                 PRIMARY KEY (mi_id, contacto_id)
             )
-        ''')
-        cursor.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS grupos (
                 id TEXT PRIMARY KEY,
-                nombre TEXT,
+                nombre TEXT NOT NULL,
                 foto TEXT,
-                creador_id TEXT
+                creador_id TEXT NOT NULL
             )
-        ''')
-        cursor.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS miembros_grupo (
-                grupo_id TEXT,
-                usuario_id TEXT,
+                grupo_id TEXT NOT NULL,
+                usuario_id TEXT NOT NULL,
                 aceptado INTEGER DEFAULT 0,
                 PRIMARY KEY (grupo_id, usuario_id)
             )
-        ''')
-        cursor.execute('''
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS mensajes (
-                id SERIAL PRIMARY KEY,
-                clave_chat TEXT,
-                emisor TEXT,
-                receptor TEXT,
-                texto TEXT,
+                id BIGSERIAL PRIMARY KEY,
+                clave_chat TEXT NOT NULL,
+                emisor TEXT NOT NULL,
+                receptor TEXT NOT NULL,
+                texto TEXT DEFAULT '',
                 nombreEmisor TEXT,
                 fotoEmisor TEXT,
                 es_grupo INTEGER DEFAULT 0,
-                fecha TIMESTAMP DEFAULT NOW()
+                fecha TIMESTAMP DEFAULT NOW(),
+                tipo TEXT DEFAULT 'texto',
+                archivo_nombre TEXT,
+                archivo_tipo TEXT,
+                archivo_tamano BIGINT,
+                archivo_data TEXT,
+                responde_a BIGINT NULL
             )
-        ''')
-        # Suscripciones de notificaciones push (una fila por dispositivo/navegador)
-        cursor.execute('''
+        """)
+
+        # Migración segura de instalaciones antiguas.
+        for statement in [
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS tipo TEXT DEFAULT 'texto'",
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS archivo_nombre TEXT",
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS archivo_tipo TEXT",
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS archivo_tamano BIGINT",
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS archivo_data TEXT",
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a BIGINT NULL",
+        ]:
+            cur.execute(statement)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS push_subscriptions (
-                id SERIAL PRIMARY KEY,
-                usuario_id TEXT,
-                endpoint TEXT UNIQUE,
-                p256dh TEXT,
-                auth TEXT
+                id BIGSERIAL PRIMARY KEY,
+                usuario_id TEXT NOT NULL,
+                endpoint TEXT UNIQUE NOT NULL,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL
             )
-        ''')
+        """)
+
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_chat_fecha ON mensajes(clave_chat, fecha, id)")
         conn.commit()
+
 
 init_db()
 
 
-def enviar_push_a_usuario(usuario_id, emisor_id, titulo, cuerpo, url='/'):
-    """Envía una notificación push real (llega aunque la pestaña esté cerrada)
-    a todos los dispositivos guardados de un usuario, salvo que sea el propio emisor."""
-    if usuario_id == emisor_id:
+def safe_user(row):
+    if not row:
+        return None
+    user = dict(row)
+    user.pop("pass", None)
+    return user
+
+
+def message_dict(row):
+    result = dict(row)
+    if isinstance(result.get("fecha"), datetime):
+        result["fecha"] = result["fecha"].isoformat()
+    return result
+
+
+def make_chat_key(a, b):
+    return "_".join(sorted([str(a), str(b)]))
+
+
+def notify_user(user_id, sender_id, title, body):
+    if user_id == sender_id or not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
         return
-    if not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
-        return  # Push no configurado (faltan las claves VAPID en las variables de entorno)
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE usuario_id = %s", (usuario_id,))
-        subs = cursor.fetchall()
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE usuario_id=%s",
+                (user_id,),
+            )
+            subs = cur.fetchall()
 
-        payload = json.dumps({'title': titulo, 'body': cuerpo, 'url': url})
+            payload = json.dumps({
+                "title": title or "Arxechat",
+                "body": body or "Nuevo mensaje",
+                "url": "/",
+            })
 
-        for s in subs:
-            try:
-                webpush(
-                    subscription_info={
-                        "endpoint": s['endpoint'],
-                        "keys": {"p256dh": s['p256dh'], "auth": s['auth']}
-                    },
-                    data=payload,
-                    vapid_private_key=VAPID_PRIVATE_KEY,
-                    vapid_claims={"sub": VAPID_CLAIMS_EMAIL}
-                )
-            except WebPushException as ex:
-                status = getattr(ex.response, 'status_code', None)
-                if status in (404, 410):
-                    # La suscripción ya no es válida (navegador desinstalado, permiso revocado, etc.)
-                    cursor.execute("DELETE FROM push_subscriptions WHERE id = %s", (s['id'],))
-        conn.commit()
+            for sub in subs:
+                try:
+                    webpush(
+                        subscription_info={
+                            "endpoint": sub["endpoint"],
+                            "keys": {
+                                "p256dh": sub["p256dh"],
+                                "auth": sub["auth"],
+                            },
+                        },
+                        data=payload,
+                        vapid_private_key=VAPID_PRIVATE_KEY,
+                        vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
+                    )
+                except WebPushException as exc:
+                    status = getattr(exc.response, "status_code", None)
+                    if status in (404, 410):
+                        cur.execute(
+                            "DELETE FROM push_subscriptions WHERE id=%s",
+                            (sub["id"],),
+                        )
+            conn.commit()
+    except Exception as exc:
+        app.logger.warning("Push no enviado: %s", exc)
 
-HTML_LAYOUT = """
-<!DOCTYPE html>
+
+HTML_LAYOUT = r"""
+<!doctype html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Arxechat</title>
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-    <style>
-        :root {
-            --bg-body: #0b141a;
-            --bg-card: #111b21;
-            --bg-header: #202c33;
-            --bg-input: #2a3942;
-            --text-main: #e9edef;
-            --text-sub: #8696a0;
-            --accent: #00a884;
-            --msg-sent: #005c4b;
-            --msg-recv: #202c33;
-            --border-color: #222d34;
-            --link-color: #53bdeb;
-        }
-
-        body.light-theme {
-            --bg-body: #e9edef;
-            --bg-card: #ffffff;
-            --bg-header: #f0f2f5;
-            --bg-input: #f0f2f5;
-            --text-main: #111b21;
-            --text-sub: #667781;
-            --accent: #008069;
-            --msg-sent: #d9fdd3;
-            --msg-recv: #ffffff;
-            --border-color: #e9edef;
-            --link-color: #027eb5;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
-        body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
-        
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
-        .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
-        .modal-box h2 { margin-bottom: 15px; color: var(--accent); }
-        .modal-box input, .modal-box select { width: 100%; padding: 12px; margin: 8px 0; background: var(--bg-input); border: 1px solid transparent; border-radius: 6px; color: var(--text-main); outline: none; font-size: 1rem; }
-        .file-label { display: block; text-align: left; font-size: 0.85rem; color: var(--text-sub); margin-top: 10px; }
-        .modal-box button, .btn-action { width: 100%; padding: 12px; background: var(--accent); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; margin-top: 10px; font-size: 1rem; }
-        .btn-copy { background: var(--bg-header); border: 1px solid var(--accent); color: var(--accent); }
-        .btn-danger { background: #ea4335 !important; }
-        .auth-toggle { margin-top: 15px; font-size: 0.9rem; color: var(--text-sub); cursor: pointer; padding: 5px; }
-        .auth-toggle span { color: var(--accent); text-decoration: underline; }
-        .error-msg { color: #ea4335; font-size: 0.85rem; margin-top: 5px; display: none; }
-        .close-btn { position: absolute; top: 10px; right: 15px; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; }
-
-        .slider-container { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
-        .slider-container input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
-
-        .member-item { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid var(--border-color); text-align: left; }
-        .member-info { display: flex; align-items: center; gap: 10px; }
-        .member-btn { background: var(--accent); border: none; color: white; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
-
-        .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
-        
-        .sidebar { width: 350px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
-        .sidebar-header { background: var(--bg-header); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
-        .user-info-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; background: none; border: none; text-align: left; color: var(--text-main); }
-        .user-avatar { width: 42px; height: 42px; border-radius: 50%; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 1.2rem; color: white; object-fit: cover; flex-shrink: 0; }
-        .add-btn { background: var(--accent); border: none; color: white; width: 40px; height: 40px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
-        .contacts-list { flex: 1; overflow-y: auto; }
-        .contact-item { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border-color); cursor: pointer; gap: 15px; background: transparent; width: 100%; border-left: none; border-right: none; border-top: none; text-align: left; color: var(--text-main); }
-        .contact-item:hover, .contact-item:active { background: var(--bg-header); }
-        .contact-info { display: flex; flex-direction: column; flex: 1; }
-        .contact-name { font-weight: bold; font-size: 1rem; }
-        .contact-id { font-size: 0.8rem; color: var(--text-sub); }
-
-        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; }
-        .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-sub); padding: 20px; }
-        .empty-state h3 { color: var(--text-main); margin-bottom: 10px; font-size: 1.5rem; }
-        
-        .active-chat-container { flex: 1; display: none; flex-direction: column; height: 100%; position: relative; z-index: 1; }
-        .chat-header { background: var(--bg-header); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); }
-        .chat-header-user { display: flex; align-items: center; gap: 12px; }
-        .add-contact-banner { background: var(--accent); color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: bold; cursor: pointer; margin-left: 10px; }
-        .chat-menu-btn { background: none; border: none; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
-        
-        .chat-messages-wrapper { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
-        .chat-bg-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background-size: cover; background-position: center; z-index: 0; pointer-events: none; }
-        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1; }
-        
-        .msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 75%; }
-        .msg-row.sent { align-self: flex-end; flex-direction: row-reverse; }
-        .msg-row.received { align-self: flex-start; }
-        
-        .msg-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-size: 0.75rem; color: white; font-weight: bold; }
-        
-        .message { padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); position: relative; width: 100%; }
-        .message.received { background: var(--msg-recv); border-top-left-radius: 0; }
-        .message.sent { background: var(--msg-sent); border-top-right-radius: 0; }
-        .message .sender-name { font-size: 0.75rem; font-weight: bold; color: var(--accent); margin-bottom: 3px; display: block; }
-        .message a { color: var(--link-color); text-decoration: underline; word-break: break-all; }
-
-        .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
-        .chat-input-area input { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
-        .chat-input-area button { background: var(--accent); border: none; padding: 12px 20px; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-size: 1rem; }
-        
-        /* Sugerencias de autocompletado */
-        .suggestions-box { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; max-height: 140px; overflow-y: auto; margin-top: 4px; text-align: left; display: none; }
-        .suggestion-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border-color); }
-        .suggestion-item:hover { background: var(--bg-header); }
-        .suggestion-item img, .suggestion-avatar { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; background: #6b7c85; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: white; }
-
-        @media (max-width: 768px) {
-            .sidebar { width: 100%; }
-            .chat-area { display: none; }
-            .chat-area.active-mobile { display: flex; position: fixed; top:0; left:0; width:100%; height:100%; z-index:500; }
-        }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111b21">
+<title>Arxechat</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+:root{
+ --bg:#0b141a;--panel:#111b21;--header:#202c33;--input:#2a3942;
+ --text:#e9edef;--muted:#8696a0;--accent:#00a884;--sent:#005c4b;
+ --recv:#202c33;--border:#26343d;--link:#53bdeb;
+}
+body.light{--bg:#e9edef;--panel:#fff;--header:#f0f2f5;--input:#fff;
+ --text:#111b21;--muted:#667781;--accent:#008069;--sent:#d9fdd3;--recv:#fff;--border:#e5e7e9}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden}
+body{font-family:Segoe UI,Tahoma,sans-serif;background:var(--bg);color:var(--text)}
+button,input,select{font:inherit}
+button{cursor:pointer}
+.hidden{display:none!important}
+.app{height:100dvh;width:100%;display:flex}
+.sidebar{width:360px;min-width:280px;border-right:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column}
+.side-head,.chat-head{height:64px;background:var(--header);display:flex;align-items:center;padding:8px 12px;gap:10px}
+.profile-btn{border:0;background:none;color:var(--text);display:flex;align-items:center;gap:9px;min-width:0;text-align:left}
+.avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#667781;color:white;display:grid;place-items:center;font-weight:700;flex:none}
+.head-actions{margin-left:auto;display:flex;gap:7px}
+.circle{width:40px;height:40px;border:0;border-radius:50%;background:var(--accent);color:#fff;font-size:22px}
+.contacts{flex:1;overflow:auto}
+.contact{width:100%;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text);padding:11px 13px;display:flex;gap:12px;text-align:left;align-items:center}
+.contact:hover{background:var(--header)}
+.contact.active{background:var(--header)}
+.contact-info{min-width:0;flex:1}
+.contact-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.contact-sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+.chat-head{flex:none}
+.back{display:none;border:0;background:none;color:var(--text);font-size:27px;padding:4px}
+.chat-title{min-width:0}.chat-title b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-title span{font-size:12px;color:var(--muted)}
+.messages-wrap{position:relative;flex:1;min-height:0;overflow:hidden}
+.bg{position:absolute;inset:0;background-size:cover;background-position:center;opacity:.2}
+.messages{position:relative;height:100%;overflow:auto;padding:18px 6%;display:flex;flex-direction:column;gap:7px}
+.row{display:flex;max-width:min(78%,720px);gap:6px;align-items:flex-end}
+.row.me{align-self:flex-end;flex-direction:row-reverse}
+.row.other{align-self:flex-start}
+.bubble{background:var(--recv);padding:7px 9px;border-radius:9px;line-height:1.4;overflow:hidden;box-shadow:0 1px 1px #0002}
+.me .bubble{background:var(--sent)}
+.sender{font-size:12px;font-weight:700;color:var(--accent);margin-bottom:3px}
+.reply-preview{border-left:3px solid var(--accent);background:#0002;padding:5px 7px;margin-bottom:5px;border-radius:4px;font-size:12px;color:var(--muted)}
+.time{font-size:10px;color:var(--muted);float:right;margin:7px 0 0 10px}
+.msg-text{white-space:pre-wrap;word-break:break-word}
+.msg-text a{color:var(--link)}
+.msg-image{display:block;max-width:360px;max-height:360px;border-radius:7px;object-fit:contain}
+.file-card{display:flex;align-items:center;gap:9px;min-width:190px}
+.file-icon{font-size:27px}.file-name{font-weight:700;word-break:break-word}.file-size{font-size:11px;color:var(--muted)}
+.msg-tools{display:none;gap:3px;margin-top:3px}
+.bubble:hover .msg-tools{display:flex}
+.tool{border:0;background:transparent;color:var(--muted);font-size:12px}
+.composer{background:var(--header);padding:8px max(10px,3vw) calc(8px + env(safe-area-inset-bottom));display:flex;gap:7px;align-items:flex-end}
+.composer input{flex:1;min-width:0;border:0;border-radius:9px;background:var(--input);color:var(--text);padding:12px;outline:none}
+.icon-btn{border:0;background:transparent;color:var(--muted);font-size:23px;padding:8px}
+.send{border:0;border-radius:9px;background:var(--accent);color:white;padding:11px 16px;font-weight:700}
+.reply-bar{position:absolute;bottom:0;left:0;right:0;background:var(--header);border-left:4px solid var(--accent);padding:8px 45px 8px 10px;z-index:3}
+.reply-close{position:absolute;right:8px;top:8px;background:none;border:0;color:var(--muted);font-size:20px}
+.file-input{display:none}
+.overlay{position:fixed;inset:0;background:#0009;display:grid;place-items:center;z-index:20;padding:15px}
+.modal{width:min(440px,100%);max-height:90dvh;overflow:auto;background:var(--panel);border-radius:12px;padding:20px}
+.modal h2{margin:0 0 14px}.modal input,.modal select{width:100%;margin:6px 0;padding:11px;border:1px solid var(--border);border-radius:7px;background:var(--input);color:var(--text)}
+.modal button.action{width:100%;margin-top:8px;padding:11px;border:0;border-radius:7px;background:var(--accent);color:#fff;font-weight:700}
+.modal button.danger{background:#d33}
+.close{float:right;background:none;border:0;color:var(--muted);font-size:25px}
+.notice{padding:8px 12px;color:var(--muted);font-size:12px}
+.auth{z-index:30}.auth .modal{text-align:center}
+.error{color:#ef5350;font-size:13px;min-height:18px}
+.preview{font-size:12px;color:var(--muted);padding:5px}
+@media(max-width:900px){
+ .sidebar{width:320px}
+ .row{max-width:85%}
+}
+@media(max-width:700px){
+ .sidebar{width:100%;min-width:0}
+ .chat{display:none;position:fixed;inset:0;z-index:5}
+ .chat.mobile-open{display:flex}
+ .back{display:block}
+ .messages{padding:12px 3%}
+ .row{max-width:91%}
+ .msg-image{max-width:72vw;max-height:45vh}
+ .composer{padding-left:7px;padding-right:7px}
+ .send{padding:11px 13px}
+}
+@media(min-width:701px){.mobile-only{display:none!important}}
+</style>
 </head>
 <body>
-
-    <div class="modal-overlay" id="authModal">
-        <div class="modal-box">
-            <h2 id="authTitle">Iniciar Sesión</h2>
-            <input type="text" id="authName" placeholder="Tu nombre / usuario">
-            <input type="password" id="authPass" placeholder="Contraseña">
-            <input type="password" id="authPassConfirm" placeholder="Confirmar contraseña" style="display:none;">
-            
-            <div id="fotoContainer" style="display:none;">
-                <label class="file-label">Foto de perfil (Opcional):</label>
-                <input type="file" id="authFoto" accept="image/*">
-            </div>
-
-            <div class="error-msg" id="errorMsg">Las contraseñas no coinciden</div>
-
-            <button type="button" onclick="procesarAuth()" id="authBtn">Entrar</button>
-            <div class="auth-toggle" onclick="toggleAuthMode()">
-                <span id="toggleText">¿Aún no tienes cuenta? Regístrate</span>
-            </div>
-        </div>
-    </div>
-
-    <div class="modal-overlay" id="addChoiceModal" style="display:none;">
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarModalChoice()">&times;</span>
-            <h2>¿Qué deseas añadir?</h2>
-            <button type="button" class="btn-action" onclick="abrirModalPersona()">Añadir Persona</button>
-            <button type="button" class="btn-action" style="background: #202c33; border: 1px solid var(--accent); color: var(--accent);" onclick="abrirModalGrupo()">Crear Grupo</button>
-        </div>
-    </div>
-
-    <div class="modal-overlay" id="addPersonModal" style="display:none;">
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarModalPersona()">&times;</span>
-            <h2>Añadir Persona</h2>
-            <input type="text" id="personIdInput" placeholder="ID o nombre de tu contacto" oninput="filtrarSugerencias(this, 'personSuggestions')">
-            <div class="suggestions-box" id="personSuggestions"></div>
-            <button type="button" class="btn-action" onclick="confirmarAgregarPersona()">Añadir Contacto</button>
-        </div>
-    </div>
-
-    <div class="modal-overlay" id="addGroupModal" style="display:none;">
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarModalGrupo()">&times;</span>
-            <h2>Crear Grupo</h2>
-            <input type="text" id="groupNameInput" placeholder="Nombre del grupo">
-            <label class="file-label">Foto del grupo (Opcional):</label>
-            <input type="file" id="groupFotoInput" accept="image/*">
-            <input type="text" id="groupMembersInput" placeholder="Añadir miembro (ID o nombre)" oninput="filtrarSugerencias(this, 'groupSuggestions')">
-            <div class="suggestions-box" id="groupSuggestions"></div>
-            <div id="selectedGroupMembers" style="text-align: left; margin-top: 5px; font-size: 0.85rem; color: var(--accent);"></div>
-            <button type="button" class="btn-action" id="btnCrearGrupo" onclick="confirmarCrearGrupo()">Crear Grupo</button>
-        </div>
-    </div>
-
-    <!-- MODAL PARA AÑADIR MIEMBROS A UN GRUPO EXISTENTE -->
-    <div class="modal-overlay" id="addMemberModal" style="display:none;">
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarModalAddMember()">&times;</span>
-            <h2>Añadir al Grupo</h2>
-            <input type="text" id="addMemberInput" placeholder="ID o nombre de tu contacto" oninput="filtrarSugerencias(this, 'addMemberSuggestions')">
-            <div class="suggestions-box" id="addMemberSuggestions"></div>
-            <button type="button" class="btn-action" onclick="confirmarAgregarMiembro()">Añadir</button>
-        </div>
-    </div>
-
-    <!-- MODAL DE AJUSTES DEL GRUPO -->
-    <div class="modal-overlay" id="groupSettingsModal" style="display:none;">
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarAjustesGrupo()">&times;</span>
-            <h2>Opciones del Grupo</h2>
-            
-            <input type="text" id="editGroupName" placeholder="Nombre del grupo">
-            <label class="file-label">Cambiar foto del grupo:</label>
-            <input type="file" id="editGroupFoto" accept="image/*">
-            <button type="button" class="btn-action" onclick="guardarInfoGrupo()">Guardar Nombre/Foto</button>
-            
-            <hr style="margin: 15px 0; border-color: var(--border-color);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                <h3 style="font-size: 1rem; color: var(--accent);">Miembros del Grupo</h3>
-                <button type="button" style="width: auto; padding: 6px 12px; margin: 0; font-size: 0.85rem;" onclick="abrirModalAddMember()">+ Añadir</button>
-            </div>
-            <div id="groupMembersList"></div>
-
-            <hr style="margin: 15px 0; border-color: var(--border-color);">
-            <button type="button" class="btn-action btn-danger" style="margin-bottom: 8px;" onclick="eliminarGrupoTotalmente()">Eliminar Grupo</button>
-            <button type="button" class="btn-action btn-danger" style="background: #a8251a !important;" onclick="eliminarChat()">Salir del Grupo</button>
-        </div>
-    </div>
-
-    <div class="modal-overlay" id="settingsModal" style="display:none;">
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
-            <h2>Ajustes de Perfil</h2>
-            <div style="margin-bottom: 10px;">
-                <span id="modalMyID" style="color: var(--accent); font-weight: bold;">ID: --------</span>
-                <button type="button" class="btn-action btn-copy" onclick="copiarMiID()">Copiar mi ID</button>
-            </div>
-            
-            <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
-            <input type="password" id="editPass" placeholder="Nueva contraseña (opcional)">
-            
-            <label class="file-label">Tema visual:</label>
-            <select id="editTheme">
-                <option value="dark">Oscuro (Negro)</option>
-                <option value="light">Claro (Blanco)</option>
-            </select>
-
-            <label class="file-label">Cambiar foto de perfil:</label>
-            <input type="file" id="editFoto" accept="image/*">
-
-            <label class="file-label">Cambiar fondo de chat:</label>
-            <input type="file" id="editFondoChat" accept="image/*">
-
-            <label class="file-label">Brillo / Intensidad del Fondo (<span id="brilloVal">100</span>%):</label>
-            <div class="slider-container">
-                <input type="range" id="editBrillo" min="10" max="100" value="100" oninput="document.getElementById('brilloVal').innerText = this.value">
-            </div>
-
-            <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
-            <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
-        </div>
-    </div>
-
-    <div class="app-container" id="appContainer">
-        <div class="sidebar">
-            <div class="sidebar-header">
-                <button type="button" class="user-info-btn" onclick="abrirAjustes()" title="Ajustes de Perfil">
-                    <img id="myAvatarImg" class="user-avatar" style="display:none;">
-                    <div id="myAvatarText" class="user-avatar">U</div>
-                    <div>
-                        <div id="myName" style="font-weight:bold;">Usuario</div>
-                        <div id="myID" style="font-size:0.75rem; color: var(--accent);">ID: --------</div>
-                    </div>
-                </button>
-                <button type="button" class="add-btn" onclick="abrirModalChoice()" title="Añadir algo">+</button>
-            </div>
-            <div class="contacts-list" id="contactsList"></div>
-        </div>
-
-        <div class="chat-area" id="chatArea">
-            <div class="empty-state" id="emptyState">
-                <h3>Arxechat para Web</h3>
-                <p>Aún no tienes chats o no has seleccionado ninguno.<br>Pulsa el botón <b>+</b> arriba a la izquierda para añadir personas o crear grupos.</p>
-            </div>
-
-            <div class="active-chat-container" id="activeChatContainer">
-                <div class="chat-header">
-                    <div class="chat-header-user">
-                        <img id="activeAvatarImg" class="user-avatar" style="display:none;">
-                        <div id="activeAvatarText" class="user-avatar">?</div>
-                        <div>
-                            <div id="activeName" class="contact-name">Contacto / Grupo</div>
-                            <div id="activeStatus" style="font-size:0.8rem; color: var(--text-sub);">En línea</div>
-                        </div>
-                        <button type="button" id="btnAddContactBanner" class="add-contact-banner" style="display:none;" onclick="guardarContactoOAceptarGrupo()"></button>
-                    </div>
-                    <button type="button" class="chat-menu-btn" onclick="abrirOpcionesMenu()" title="Opciones">&#8285;</button>
-                </div>
-                
-                <div class="chat-messages-wrapper">
-                    <div class="chat-bg-overlay" id="chatBgOverlay"></div>
-                    <div class="chat-messages" id="messages"></div>
-                </div>
-
-                <div class="chat-input-area">
-                    <input type="text" id="messageInput" placeholder="Escribe un mensaje..." autocomplete="off">
-                    <button type="button" onclick="sendMessage()">Enviar</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const socket = io();
-        const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
-        let isRegister = false;
-        let miUsuario = null;
-        let contactoActivo = null;
-        let misContactos = [];
-        let miembrosCrearGrupo = [];
-
-        window.onload = () => {
-            const sesionGuardada = localStorage.getItem('arxechat_sesion');
-            if (sesionGuardada) {
-                miUsuario = JSON.parse(sesionGuardada);
-                socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
-            }
-        };
-
-        function aplicarTema() {
-            if (miUsuario && miUsuario.tema === 'light') {
-                document.body.classList.add('light-theme');
-            } else {
-                document.body.classList.remove('light-theme');
-            }
-
-            const bgOverlay = document.getElementById('chatBgOverlay');
-            if (miUsuario && miUsuario.fondoChat) {
-                bgOverlay.style.backgroundImage = `url('${miUsuario.fondoChat}')`;
-                const opacidad = (miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100) / 100;
-                bgOverlay.style.opacity = opacidad;
-            } else {
-                bgOverlay.style.backgroundImage = 'none';
-            }
-        }
-
-        function toggleAuthMode() {
-            isRegister = !isRegister;
-            limpiarErrores();
-            document.getElementById('authTitle').innerText = isRegister ? 'Registrarse' : 'Iniciar Sesión';
-            document.getElementById('authBtn').innerText = isRegister ? 'Crear Cuenta' : 'Entrar';
-            document.getElementById('authPassConfirm').style.display = isRegister ? 'block' : 'none';
-            document.getElementById('fotoContainer').style.display = isRegister ? 'block' : 'none';
-            document.getElementById('toggleText').innerText = isRegister ? '¿Ya tienes cuenta? Inicia sesión' : '¿Aún no tienes cuenta? Regístrate';
-        }
-
-        function limpiarErrores() { document.getElementById('errorMsg').style.display = 'none'; }
-
-        function convertAndCompressBase64(file) {
-            return new Promise((resolve) => {
-                const reader = new FileReader();
-                reader.readAsDataURL(file);
-                reader.onload = (e) => {
-                    const img = new Image();
-                    img.src = e.target.result;
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        let width = img.width;
-                        let height = img.height;
-                        const maxDim = 800;
-                        if (width > maxDim || height > maxDim) {
-                            if (width > height) {
-                                height = Math.round((height * maxDim) / width);
-                                width = maxDim;
-                            } else {
-                                width = Math.round((width * maxDim) / height);
-                                height = maxDim;
-                            }
-                        }
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        resolve(canvas.toDataURL('image/jpeg', 0.7));
-                    };
-                };
-            });
-        }
-
-        async function procesarAuth() {
-            limpiarErrores();
-            const nombre = document.getElementById('authName').value.trim();
-            const pass = document.getElementById('authPass').value;
-            
-            if(!nombre || !pass) return alert("Rellena todos los campos");
-
-            if(isRegister) {
-                const pass2 = document.getElementById('authPassConfirm').value;
-                if(pass !== pass2) {
-                    document.getElementById('errorMsg').style.display = 'block';
-                    return;
-                }
-                
-                let fotoBase64 = null;
-                const fileInput = document.getElementById('authFoto');
-                if(fileInput.files.length > 0) {
-                    fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
-                }
-
-                socket.emit('registrar_usuario', { nombre, pass, foto: fotoBase64 });
-            } else {
-                socket.emit('login_usuario', { nombre, pass });
-            }
-        }
-
-        socket.on('auth_resultado', (res) => {
-            if (res.exito) {
-                miUsuario = res.usuario;
-                localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
-                if(isRegister) alert("¡Cuenta creada! Tu ID es: " + miUsuario.id);
-                iniciarApp();
-            } else {
-                alert(res.mensaje);
-                localStorage.removeItem('arxechat_sesion');
-                document.getElementById('authModal').style.display = 'flex';
-                document.getElementById('appContainer').style.display = 'none';
-            }
-        });
-
-        function urlBase64ToUint8Array(base64String) {
-            const padding = '='.repeat((4 - base64String.length % 4) % 4);
-            const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-            const rawData = window.atob(base64);
-            const outputArray = new Uint8Array(rawData.length);
-            for (let i = 0; i < rawData.length; ++i) {
-                outputArray[i] = rawData.charCodeAt(i);
-            }
-            return outputArray;
-        }
-
-        // Registra el Service Worker y activa notificaciones push reales:
-        // llegan aunque la pestaña o el navegador estén cerrados (mientras el
-        // sistema operativo no cierre por completo el navegador en segundo plano).
-        async function solicitarPermisoNotificaciones() {
-            if (!('serviceWorker' in navigator) || !('PushManager' in window) || !VAPID_PUBLIC_KEY) {
-                return;
-            }
-            try {
-                const registration = await navigator.serviceWorker.register('/service-worker.js');
-                const permiso = await Notification.requestPermission();
-                if (permiso !== 'granted') return;
-
-                let subscription = await registration.pushManager.getSubscription();
-                if (!subscription) {
-                    subscription = await registration.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
-                    });
-                }
-                socket.emit('guardar_subscripcion_push', {
-                    usuario_id: miUsuario.id,
-                    subscription: subscription.toJSON()
-                });
-            } catch (err) {
-                console.warn('No se pudieron activar las notificaciones push:', err);
-            }
-        }
-
-        function iniciarApp() {
-            document.getElementById('authModal').style.display = 'none';
-            document.getElementById('appContainer').style.display = 'flex';
-            
-            document.getElementById('myName').innerText = miUsuario.nombre;
-            document.getElementById('myID').innerText = "ID: " + miUsuario.id;
-            document.getElementById('modalMyID').innerText = "Tu ID: " + miUsuario.id;
-            
-            if (miUsuario.foto) {
-                document.getElementById('myAvatarImg').src = miUsuario.foto;
-                document.getElementById('myAvatarImg').style.display = 'block';
-                document.getElementById('myAvatarText').style.display = 'none';
-            } else {
-                document.getElementById('myAvatarImg').style.display = 'none';
-                document.getElementById('myAvatarText').style.display = 'flex';
-                document.getElementById('myAvatarText').innerText = miUsuario.nombre.charAt(0).toUpperCase();
-            }
-
-            aplicarTema();
-            solicitarPermisoNotificaciones();
-            
-            socket.emit('conectar_usuario', { id: miUsuario.id });
-            socket.emit('obtener_contactos', { id: miUsuario.id });
-        }
-
-        function copiarMiID() {
-            navigator.clipboard.writeText(miUsuario.id);
-            alert("¡ID copiado al portapapeles!: " + miUsuario.id);
-        }
-
-        function abrirModalChoice() { document.getElementById('addChoiceModal').style.display = 'flex'; }
-        function cerrarModalChoice() { document.getElementById('addChoiceModal').style.display = 'none'; }
-        
-        function abrirModalPersona() { 
-            cerrarModalChoice(); 
-            document.getElementById('personIdInput').value = '';
-            document.getElementById('personSuggestions').style.display = 'none';
-            document.getElementById('addPersonModal').style.display = 'flex'; 
-        }
-        function cerrarModalPersona() { document.getElementById('addPersonModal').style.display = 'none'; }
-        
-        function abrirModalGrupo() { 
-            cerrarModalChoice(); 
-            miembrosCrearGrupo = [];
-            document.getElementById('groupNameInput').value = '';
-            document.getElementById('groupMembersInput').value = '';
-            document.getElementById('groupSuggestions').style.display = 'none';
-            document.getElementById('selectedGroupMembers').innerText = '';
-            document.getElementById('addGroupModal').style.display = 'flex'; 
-        }
-        function cerrarModalGrupo() { document.getElementById('addGroupModal').style.display = 'none'; }
-
-        function abrirModalAddMember() {
-            // Se oculta primero el modal de "Opciones del Grupo" para que no quede
-            // apilado debajo (eso era lo que dejaba el fondo en negro).
-            document.getElementById('groupSettingsModal').style.display = 'none';
-            document.getElementById('addMemberInput').value = '';
-            document.getElementById('addMemberSuggestions').style.display = 'none';
-            document.getElementById('addMemberModal').style.display = 'flex';
-        }
-        function cerrarModalAddMember() {
-            document.getElementById('addMemberModal').style.display = 'none';
-            // Al cerrar (con la X o tras añadir), se vuelve a mostrar "Opciones del Grupo".
-            document.getElementById('groupSettingsModal').style.display = 'flex';
-        }
-
-        /* Filtrado y sugerencias de contactos */
-        function filtrarSugerencias(inputElem, suggestionsContainerId) {
-            const query = inputElem.value.trim().toLowerCase();
-            const container = document.getElementById(suggestionsContainerId);
-            container.innerHTML = '';
-
-            if(!query) {
-                container.style.display = 'none';
-                return;
-            }
-
-            const coincidencias = misContactos.filter(c => !c.esGrupo && (c.nombre.toLowerCase().includes(query) || c.id.includes(query)));
-
-            if(coincidencias.length === 0) {
-                container.style.display = 'none';
-                return;
-            }
-
-            coincidencias.forEach(c => {
-                const div = document.createElement('div');
-                div.className = 'suggestion-item';
-                
-                const avatar = c.foto ? `<img src="${c.foto}">` : `<div class="suggestion-avatar">${c.nombre.charAt(0).toUpperCase()}</div>`;
-                div.innerHTML = `${avatar} <div><strong>${c.nombre}</strong> <br><small style="color:var(--text-sub)">${c.id}</small></div>`;
-                
-                div.onclick = () => {
-                    inputElem.value = c.id;
-                    container.style.display = 'none';
-                    if(suggestionsContainerId === 'groupSuggestions') {
-                        if(!miembrosCrearGrupo.includes(c.id)) {
-                            miembrosCrearGrupo.push(c.id);
-                            document.getElementById('selectedGroupMembers').innerText = "Añadidos: " + miembrosCrearGrupo.join(', ');
-                        }
-                        inputElem.value = '';
-                    }
-                };
-                container.appendChild(div);
-            });
-            container.style.display = 'block';
-        }
-
-        function confirmarAgregarPersona() {
-            const idContacto = document.getElementById('personIdInput').value.trim();
-            if(idContacto && idContacto.length === 8) {
-                if(idContacto === miUsuario.id) return alert("No puedes añadirte a ti mismo.");
-                socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: idContacto });
-                cerrarModalPersona();
-            } else {
-                alert("El ID debe tener exactamente 8 dígitos.");
-            }
-        }
-
-        async function confirmarCrearGrupo() {
-            const nombre = document.getElementById('groupNameInput').value.trim();
-            const rawInput = document.getElementById('groupMembersInput').value.trim();
-            
-            if(!nombre) return alert("Introduce un nombre para el grupo.");
-            
-            if(rawInput && rawInput.length === 8 && !miembrosCrearGrupo.includes(rawInput)) {
-                miembrosCrearGrupo.push(rawInput);
-            }
-
-            const btn = document.getElementById('btnCrearGrupo');
-            btn.innerText = "Creando...";
-            btn.disabled = true;
-
-            let fotoBase64 = null;
-            const fileInput = document.getElementById('groupFotoInput');
-            if(fileInput.files.length > 0) {
-                fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
-            }
-
-            miembrosCrearGrupo.push(miUsuario.id);
-
-            socket.emit('crear_grupo', {
-                nombre: nombre,
-                foto: fotoBase64,
-                creador_id: miUsuario.id,
-                miembros: miembrosCrearGrupo
-            });
-        }
-
-        function confirmarAgregarMiembro() {
-            const nuevoId = document.getElementById('addMemberInput').value.trim();
-            if(nuevoId && nuevoId.length === 8) {
-                socket.emit('anadir_miembro_grupo', { grupo_id: contactoActivo.id, usuario_id: nuevoId });
-                cerrarModalAddMember();
-            } else {
-                alert("El ID debe tener 8 dígitos.");
-            }
-        }
-
-        socket.on('miembro_anadido_resultado', (res) => {
-            if(res.exito) {
-                alert("Miembro añadido al grupo.");
-                socket.emit('obtener_detalles_grupo', { grupo_id: contactoActivo.id });
-            } else {
-                alert(res.mensaje);
-            }
-        });
-
-        socket.on('grupo_creado_resultado', (res) => {
-            const btn = document.getElementById('btnCrearGrupo');
-            btn.innerText = "Crear Grupo";
-            btn.disabled = false;
-
-            if(res.exito) {
-                alert("¡Grupo creado con éxito!");
-                cerrarModalGrupo();
-                socket.emit('obtener_contactos', { id: miUsuario.id });
-            } else {
-                alert(res.mensaje);
-            }
-        });
-
-        function abrirOpcionesMenu() {
-            if(!contactoActivo) return;
-            if(contactoActivo.esGrupo) {
-                document.getElementById('editGroupName').value = contactoActivo.nombre;
-                socket.emit('obtener_detalles_grupo', { grupo_id: contactoActivo.id });
-                document.getElementById('groupSettingsModal').style.display = 'flex';
-            } else {
-                eliminarChat();
-            }
-        }
-
-        function cerrarAjustesGrupo() {
-            document.getElementById('groupSettingsModal').style.display = 'none';
-        }
-
-        socket.on('detalles_grupo_cargados', (data) => {
-            const container = document.getElementById('groupMembersList');
-            container.innerHTML = '';
-            data.miembros.forEach(m => {
-                const item = document.createElement('div');
-                item.className = 'member-item';
-                
-                const esYo = m.id === miUsuario.id;
-                const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}', '${m.nombre}')">Privado</button>`;
-                
-                item.innerHTML = `
-                    <div class="member-info">
-                        <strong>${m.nombre}</strong> <span style="font-size:0.8rem; color:var(--text-sub);">(ID: ${m.id})</span>
-                    </div>
-                    ${botonPrivado}
-                `;
-                container.appendChild(item);
-            });
-        });
-
-        function iniciarChatPrivado(id, nombre) {
-            cerrarAjustesGrupo();
-            socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: id });
-            seleccionarContacto({ id: id, nombre: nombre, foto: null, esGuardado: true, esGrupo: false });
-        }
-
-        async function guardarInfoGrupo() {
-            const nuevoNombre = document.getElementById('editGroupName').value.trim();
-            const fileInput = document.getElementById('editGroupFoto');
-            let nuevaFoto = null;
-
-            if(fileInput.files.length > 0) {
-                nuevaFoto = await convertAndCompressBase64(fileInput.files[0]);
-            }
-
-            socket.emit('actualizar_grupo', {
-                grupo_id: contactoActivo.id,
-                nombre: nuevoNombre,
-                foto: nuevaFoto
-            });
-        }
-
-        socket.on('grupo_actualizado', (res) => {
-            if(res.exito) {
-                alert("Grupo actualizado.");
-                cerrarAjustesGrupo();
-                socket.emit('obtener_contactos', { id: miUsuario.id });
-            }
-        });
-
-        function abrirAjustes() {
-            document.getElementById('editName').value = miUsuario.nombre;
-            document.getElementById('editTheme').value = miUsuario.tema || 'dark';
-            const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100;
-            document.getElementById('editBrillo').value = brillo;
-            document.getElementById('brilloVal').innerText = brillo;
-            document.getElementById('settingsModal').style.display = 'flex';
-        }
-
-        function cerrarAjustes() { document.getElementById('settingsModal').style.display = 'none'; }
-
-        async function guardarAjustes() {
-            const btn = document.getElementById('btnGuardarAjustes');
-            btn.innerText = "Guardando...";
-            btn.disabled = true;
-
-            const nuevoNombre = document.getElementById('editName').value.trim();
-            const nuevaPass = document.getElementById('editPass').value;
-            const nuevoTema = document.getElementById('editTheme').value;
-            const nuevoBrillo = parseInt(document.getElementById('editBrillo').value);
-            
-            const fileFoto = document.getElementById('editFoto');
-            let nuevaFoto = miUsuario.foto;
-            if (fileFoto.files.length > 0) {
-                nuevaFoto = await convertAndCompressBase64(fileFoto.files[0]);
-            }
-
-            const fileFondo = document.getElementById('editFondoChat');
-            let nuevoFondo = miUsuario.fondoChat;
-            if (fileFondo.files.length > 0) {
-                nuevoFondo = await convertAndCompressBase64(fileFondo.files[0]);
-            }
-
-            socket.emit('actualizar_perfil', { 
-                id: miUsuario.id, 
-                nombre: nuevoNombre, 
-                pass: nuevaPass, 
-                foto: nuevaFoto,
-                fondoChat: nuevoFondo,
-                tema: nuevoTema,
-                brilloFondo: nuevoBrillo
-            });
-        }
-
-        socket.on('perfil_actualizado', (res) => {
-            const btn = document.getElementById('btnGuardarAjustes');
-            btn.innerText = "Guardar Cambios";
-            btn.disabled = false;
-
-            if(res.exito) {
-                miUsuario = res.usuario;
-                localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
-                alert("¡Ajustes guardados correctamente!");
-                cerrarAjustes();
-                iniciarApp();
-            } else {
-                alert(res.mensaje);
-            }
-        });
-
-        function cerrarSesion() {
-            localStorage.removeItem('arxechat_sesion');
-            location.reload();
-        }
-
-        socket.on('contacto_resultado', (res) => {
-            if(!res.exito) {
-                alert(res.mensaje);
-            } else {
-                socket.emit('obtener_contactos', { id: miUsuario.id });
-            }
-        });
-
-        socket.on('contactos_cargados', (lista) => {
-            misContactos = lista;
-            renderizarContactos();
-        });
-
-        function renderizarContactos() {
-            const listaDiv = document.getElementById('contactsList');
-            listaDiv.innerHTML = '';
-            misContactos.forEach(c => {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'contact-item';
-                btn.onclick = () => seleccionarContacto(c);
-                
-                const avatarHtml = c.foto ? `<img src="${c.foto}" class="user-avatar">` : `<div class="user-avatar">${c.nombre.charAt(0).toUpperCase()}</div>`;
-                
-                let etiqueta = '';
-                if (c.esGrupo) {
-                    etiqueta = c.esGuardado ? '<span style="font-size:0.75rem; color:var(--accent);">(Grupo)</span>' : '<span style="font-size:0.75rem; color:#ea4335;">[Aceptar Grupo]</span>';
-                } else {
-                    etiqueta = c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>';
-                }
-
-                btn.innerHTML = `
-                    ${avatarHtml}
-                    <div class="contact-info">
-                        <div class="contact-name">${c.nombre} ${etiqueta}</div>
-                        <div class="contact-id">${c.esGrupo ? 'Grupo' : 'ID: ' + c.id}</div>
-                    </div>
-                `;
-                listaDiv.appendChild(btn);
-            });
-        }
-
-        function seleccionarContacto(c) {
-            contactoActivo = c;
-            document.getElementById('emptyState').style.display = 'none';
-            document.getElementById('activeChatContainer').style.display = 'flex';
-            document.getElementById('activeName').innerText = c.nombre;
-            document.getElementById('activeStatus').innerText = c.esGrupo ? "Grupo de chat" : "En línea";
-            
-            if(window.innerWidth <= 768) {
-                document.getElementById('chatArea').classList.add('active-mobile');
-            }
-
-            const bannerBtn = document.getElementById('btnAddContactBanner');
-            if(!c.esGuardado) {
-                bannerBtn.style.display = 'inline-block';
-                bannerBtn.innerText = c.esGrupo ? "Aceptar Grupo" : "+ Añadir a contactos";
-            } else {
-                bannerBtn.style.display = 'none';
-            }
-
-            if(c.foto) {
-                document.getElementById('activeAvatarImg').src = c.foto;
-                document.getElementById('activeAvatarImg').style.display = 'block';
-                document.getElementById('activeAvatarText').style.display = 'none';
-            } else {
-                document.getElementById('activeAvatarImg').style.display = 'none';
-                document.getElementById('activeAvatarText').style.display = 'flex';
-                document.getElementById('activeAvatarText').innerText = c.nombre.charAt(0).toUpperCase();
-            }
-            
-            document.getElementById('messages').innerHTML = '';
-            socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: c.id, esGrupo: c.esGrupo });
-        }
-
-        function guardarContactoOAceptarGrupo() {
-            if(contactoActivo) {
-                if(contactoActivo.esGrupo) {
-                    socket.emit('aceptar_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
-                } else {
-                    socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
-                }
-                contactoActivo.esGuardado = true;
-                document.getElementById('btnAddContactBanner').style.display = 'none';
-            }
-        }
-
-        socket.on('grupo_aceptado', () => {
-            alert("¡Grupo guardado en tu cuenta!");
-            socket.emit('obtener_contactos', { id: miUsuario.id });
-        });
-
-        function eliminarGrupoTotalmente() {
-            if(contactoActivo && contactoActivo.esGrupo && confirm("¿Estás seguro de que deseas eliminar este grupo para todos los miembros? Se borra permanentemente.")) {
-                socket.emit('eliminar_grupo_completo', { grupo_id: contactoActivo.id });
-            }
-        }
-
-        socket.on('grupo_eliminado', () => {
-            cerrarAjustesGrupo();
-            document.getElementById('messages').innerHTML = '';
-            document.getElementById('activeChatContainer').style.display = 'none';
-            document.getElementById('emptyState').style.display = 'flex';
-            if(window.innerWidth <= 768) {
-                document.getElementById('chatArea').classList.remove('active-mobile');
-            }
-            socket.emit('obtener_contactos', { id: miUsuario.id });
-        });
-
-        function eliminarChat() {
-            if(contactoActivo && confirm(contactoActivo.esGrupo ? "¿Quieres salir de este grupo?" : "¿Quieres borrar este contacto y su conversación?")) {
-                if(contactoActivo.esGrupo) {
-                    socket.emit('salir_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
-                } else {
-                    socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
-                }
-                cerrarAjustesGrupo();
-                document.getElementById('messages').innerHTML = '';
-                document.getElementById('activeChatContainer').style.display = 'none';
-                document.getElementById('emptyState').style.display = 'flex';
-                if(window.innerWidth <= 768) {
-                    document.getElementById('chatArea').classList.remove('active-mobile');
-                }
-            }
-        }
-
-        function formatearTextoConLinks(texto) {
-            const urlRegex = /(https?:\/\/[^\s]+)/g;
-            return texto.replace(urlRegex, function(url) {
-                return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
-            });
-        }
-
-        function renderizarMensaje(msg) {
-            const messagesDiv = document.getElementById('messages');
-            const esMio = msg.emisor === miUsuario.id;
-            
-            const rowDiv = document.createElement('div');
-            rowDiv.className = `msg-row ${esMio ? 'sent' : 'received'}`;
-
-            let avatarHtml = '';
-            if(!esMio && contactoActivo.esGrupo) {
-                avatarHtml = msg.fotoEmisor 
-                    ? `<img src="${msg.fotoEmisor}" class="msg-avatar">`
-                    : `<div class="msg-avatar">${(msg.nombreEmisor || '?').charAt(0).toUpperCase()}</div>`;
-            }
-
-            const msgElement = document.createElement('div');
-            msgElement.className = `message ${esMio ? 'sent' : 'received'}`;
-
-            let senderHeader = '';
-            if(!esMio && contactoActivo.esGrupo) {
-                senderHeader = `<span class="sender-name">${msg.nombreEmisor || 'Usuario'}</span>`;
-            }
-
-            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}`;
-            
-            rowDiv.innerHTML = avatarHtml;
-            rowDiv.appendChild(msgElement);
-
-            messagesDiv.appendChild(rowDiv);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
-
-        socket.on('historial_cargado', (mensajes) => {
-            const messagesDiv = document.getElementById('messages');
-            messagesDiv.innerHTML = '';
-            mensajes.forEach(msg => renderizarMensaje(msg));
-        });
-
-        socket.on('recibir_mensaje', (data) => {
-            socket.emit('obtener_contactos', { id: miUsuario.id });
-
-            if(contactoActivo && (data.clave_chat === contactoActivo.id || data.emisor === contactoActivo.id || data.receptor === miUsuario.id)) {
-                renderizarMensaje(data);
-            }
-            // La notificación visual ahora la muestra el Service Worker (push real),
-            // así llega igual aunque la pestaña esté cerrada; aquí ya no se duplica.
-        });
-
-        function sendMessage() {
-            const input = document.getElementById('messageInput');
-            const texto = input.value.trim();
-            if (texto !== '' && contactoActivo) {
-                socket.emit('mensaje_enviado', {
-                    emisor: miUsuario.id,
-                    nombreEmisor: miUsuario.nombre,
-                    fotoEmisor: miUsuario.foto,
-                    receptor: contactoActivo.id,
-                    esGrupo: contactoActivo.esGrupo ? 1 : 0,
-                    texto: texto
-                });
-                input.value = '';
-            }
-        }
-
-        document.getElementById('messageInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-        });
-    </script>
+<div id="auth" class="overlay auth">
+ <div class="modal">
+  <h2 id="authTitle">Iniciar sesión</h2>
+  <input id="authName" placeholder="Nombre de usuario" autocomplete="username">
+  <input id="authPass" type="password" placeholder="Contraseña" autocomplete="current-password">
+  <input id="authPass2" type="password" placeholder="Repite la contraseña" class="hidden">
+  <input id="authPhoto" type="file" accept="image/*" class="hidden">
+  <div id="authError" class="error"></div>
+  <button class="action" id="authButton">Entrar</button>
+  <button class="action" id="authToggle" style="background:transparent;color:var(--accent)">Crear una cuenta</button>
+ </div>
+</div>
+
+<div id="addModal" class="overlay hidden">
+ <div class="modal">
+  <button class="close" onclick="closeModal('addModal')">×</button>
+  <h2>Añadir</h2>
+  <input id="personInput" placeholder="ID de 8 dígitos o nombre">
+  <button class="action" onclick="addPerson()">Añadir persona</button>
+  <hr>
+  <input id="groupName" placeholder="Nombre del grupo">
+  <input id="groupMembers" placeholder="IDs separados por comas">
+  <input id="groupPhoto" type="file" accept="image/*">
+  <button class="action" onclick="createGroup()">Crear grupo</button>
+ </div>
+</div>
+
+<div id="settingsModal" class="overlay hidden">
+ <div class="modal">
+  <button class="close" onclick="closeModal('settingsModal')">×</button>
+  <h2>Ajustes</h2>
+  <div id="myIdText" class="notice"></div>
+  <input id="editName" placeholder="Nombre">
+  <input id="editPass" type="password" placeholder="Nueva contraseña (opcional)">
+  <select id="editTheme"><option value="dark">Oscuro</option><option value="light">Claro</option></select>
+  <input id="editPhoto" type="file" accept="image/*">
+  <input id="editBg" type="file" accept="image/*">
+  <label>Intensidad del fondo</label>
+  <input id="editBrightness" type="range" min="10" max="100" value="100">
+  <button class="action" onclick="saveSettings()">Guardar</button>
+  <button class="action danger" onclick="logout()">Cerrar sesión</button>
+ </div>
+</div>
+
+<div id="app" class="app hidden">
+ <aside class="sidebar">
+  <div class="side-head">
+   <button class="profile-btn" onclick="openSettings()">
+    <img id="myImg" class="avatar hidden">
+    <div id="myAvatar" class="avatar">U</div>
+    <div style="min-width:0"><b id="myName">Usuario</b><div id="myId" style="font-size:11px;color:var(--accent)"></div></div>
+   </button>
+   <div class="head-actions">
+    <button class="circle" onclick="openModal('addModal')">+</button>
+   </div>
+  </div>
+  <div class="notice" id="connection">Conectando…</div>
+  <div id="contacts" class="contacts"></div>
+ </aside>
+
+ <main id="chat" class="chat">
+  <div class="chat-head">
+   <button class="back mobile-only" onclick="closeChat()">‹</button>
+   <img id="activeImg" class="avatar hidden">
+   <div id="activeAvatar" class="avatar">?</div>
+   <div class="chat-title"><b id="activeName">Selecciona un chat</b><span id="activeStatus"></span></div>
+  </div>
+  <div class="messages-wrap">
+   <div id="bg" class="bg"></div>
+   <div id="messages" class="messages">
+    <div class="notice" style="margin:auto;text-align:center">Selecciona una conversación para empezar.</div>
+   </div>
+   <div id="replyBar" class="reply-bar hidden">
+    <button class="reply-close" onclick="cancelReply()">×</button>
+    <b>Respondiendo a <span id="replyName"></span></b>
+    <div id="replyText" class="preview"></div>
+   </div>
+  </div>
+  <div class="composer">
+   <button class="icon-btn" title="Adjuntar" onclick="document.getElementById('fileInput').click()">📎</button>
+   <input id="fileInput" type="file" class="file-input" accept="image/*,.pdf,.txt,.doc,.docx,.xls,.xlsx,.zip,.rar" onchange="prepareFile()">
+   <input id="messageInput" placeholder="Escribe un mensaje…" autocomplete="off">
+   <button class="send" onclick="sendMessage()">Enviar</button>
+  </div>
+ </main>
+</div>
+
+<script>
+const socket = io({transports:['websocket','polling'],reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:500,reconnectionDelayMax:5000});
+const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
+let user=null, contacts=[], active=null, replyTo=null, pendingFile=null, authRegister=false;
+let renderedIds=new Set(), historyRequestToken=0;
+
+const $=id=>document.getElementById(id);
+function openModal(id){$(id).classList.remove('hidden')}
+function closeModal(id){$(id).classList.add('hidden')}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
+function formatBytes(n){if(!n)return '';const u=['B','KB','MB','GB'];let i=0,x=n;while(x>=1024&&i<3){x/=1024;i++}return x.toFixed(i?1:0)+' '+u[i]}
+function avatarHTML(c, cls='avatar'){return c.foto?`<img class="${cls}" src="${esc(c.foto)}">`:`<div class="${cls}">${esc((c.nombre||'?')[0].toUpperCase())}</div>`}
+
+function applyTheme(){
+ document.body.classList.toggle('light', user?.tema==='light');
+ if(user?.fondoChat){$('bg').style.backgroundImage=`url("${user.fondoChat}")`;$('bg').style.opacity=(user.brilloFondo??100)/100}
+ else $('bg').style.backgroundImage='none';
+}
+
+function imageToBase64(file,maxDim=1000,quality=.78){
+ return new Promise((resolve,reject)=>{
+  const r=new FileReader();r.onerror=reject;r.onload=e=>{
+   if(!file.type.startsWith('image/')) return resolve(e.target.result);
+   const img=new Image();img.onload=()=>{
+    let w=img.width,h=img.height;
+    if(Math.max(w,h)>maxDim){const k=maxDim/Math.max(w,h);w=Math.round(w*k);h=Math.round(h*k)}
+    const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);
+    resolve(c.toDataURL('image/jpeg',quality));
+   };img.onerror=reject;img.src=e.target.result;
+  };r.readAsDataURL(file);
+ });
+}
+
+window.addEventListener('load',()=>{
+ const saved=localStorage.getItem('arxechat_user');
+ if(saved){try{const u=JSON.parse(saved);user=u;socket.emit('login_usuario',{nombre:u.nombre,pass:u.pass})}catch{localStorage.removeItem('arxechat_user')}}
+});
+$('authToggle').onclick=()=>{
+ authRegister=!authRegister;$('authTitle').textContent=authRegister?'Crear cuenta':'Iniciar sesión';
+ $('authButton').textContent=authRegister?'Crear cuenta':'Entrar';$('authPass2').classList.toggle('hidden',!authRegister);
+ $('authPhoto').classList.toggle('hidden',!authRegister);$('authError').textContent='';
+};
+$('authButton').onclick=async()=>{
+ const nombre=$('authName').value.trim(),pass=$('authPass').value;
+ if(!nombre||!pass)return $('authError').textContent='Rellena todos los campos.';
+ if(authRegister){
+  if(pass!==$('authPass2').value)return $('authError').textContent='Las contraseñas no coinciden.';
+  let foto=null;if($('authPhoto').files[0])foto=await imageToBase64($('authPhoto').files[0],700,.7);
+  socket.emit('registrar_usuario',{nombre,pass,foto});
+ }else socket.emit('login_usuario',{nombre,pass});
+};
+
+socket.on('connect',()=>{$('connection').textContent='● Conectado';$('connection').style.color='var(--accent)';if(user)socket.emit('conectar_usuario',{id:user.id})});
+socket.on('disconnect',()=>{$('connection').textContent='● Reconectando…';$('connection').style.color='#e9a23b'});
+socket.on('connect_error',()=>{$('connection').textContent='● Error de conexión';$('connection').style.color='#ef5350'});
+
+socket.on('auth_resultado',res=>{
+ if(!res.exito){$('authError').textContent=res.mensaje;return}
+ user=res.usuario;localStorage.setItem('arxechat_user',JSON.stringify(user));startApp();
+});
+function startApp(){
+ $('auth').classList.add('hidden');$('app').classList.remove('hidden');
+ $('myName').textContent=user.nombre;$('myId').textContent='ID: '+user.id;$('myIdText').textContent='Tu ID: '+user.id;
+ if(user.foto){$('myImg').src=user.foto;$('myImg').classList.remove('hidden');$('myAvatar').classList.add('hidden')}
+ else{$('myImg').classList.add('hidden');$('myAvatar').classList.remove('hidden');$('myAvatar').textContent=(user.nombre||'U')[0].toUpperCase()}
+ applyTheme();socket.emit('conectar_usuario',{id:user.id});socket.emit('obtener_contactos',{id:user.id});enablePush();
+}
+function enablePush(){if(!VAPID_PUBLIC_KEY||!('serviceWorker'in navigator)||!('PushManager'in window))return;
+ navigator.serviceWorker.register('/service-worker.js').then(async reg=>{
+  if(Notification.permission==='default')await Notification.requestPermission();
+  if(Notification.permission!=='granted')return;
+  let sub=await reg.pushManager.getSubscription();
+  if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:base64ToUint8(VAPID_PUBLIC_KEY)});
+  socket.emit('guardar_subscripcion_push',{usuario_id:user.id,subscription:sub.toJSON()});
+ }).catch(()=>{});
+}
+function base64ToUint8(s){const p='='.repeat((4-s.length%4)%4),b=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from(b,c=>c.charCodeAt(0))}
+
+socket.on('contactos_cargados',list=>{contacts=list;renderContacts()});
+function renderContacts(){
+ const box=$('contacts');box.innerHTML='';
+ contacts.forEach(c=>{
+  const b=document.createElement('button');b.className='contact'+(active&&active.id===c.id?' active':'');
+  b.innerHTML=avatarHTML(c)+`<div class="contact-info"><div class="contact-name">${esc(c.nombre)} ${c.esGrupo?'👥':''}</div><div class="contact-sub">${c.esGrupo?'Grupo':'ID: '+esc(c.id)}${!c.esGuardado?' · Nuevo':''}</div></div>`;
+  b.onclick=()=>selectChat(c);box.appendChild(b);
+ });
+}
+function selectChat(c){
+ active=c;renderContacts();$('chat').classList.add('mobile-open');
+ $('activeName').textContent=c.nombre;$('activeStatus').textContent=c.esGrupo?'Grupo':'Chat privado';
+ if(c.foto){$('activeImg').src=c.foto;$('activeImg').classList.remove('hidden');$('activeAvatar').classList.add('hidden')}
+ else{$('activeImg').classList.add('hidden');$('activeAvatar').classList.remove('hidden');$('activeAvatar').textContent=(c.nombre||'?')[0].toUpperCase()}
+ $('messages').innerHTML='';renderedIds.clear();cancelReply();
+ if(c.fondoChat)$('bg').style.backgroundImage=`url("${c.fondoChat}")`;
+ const token=++historyRequestToken;
+ socket.emit('cargar_historial',{emisor:user.id,receptor:c.id,esGrupo:c.esGrupo,token});
+}
+function closeChat(){$('chat').classList.remove('mobile-open');active=null;renderContacts()}
+
+function textLinks(s){return esc(s).replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')}
+function renderMessage(m){
+ if(m.id && renderedIds.has(String(m.id)))return; if(m.id)renderedIds.add(String(m.id));
+ if(!active)return;
+ const row=document.createElement('div');row.className='row '+(m.emisor===user.id?'me':'other');if(m.id)row.dataset.id=m.id;
+ const bubble=document.createElement('div');bubble.className='bubble';
+ let html='';
+ if(active.esGrupo && m.emisor!==user.id)html+=`<div class="sender">${esc(m.nombreEmisor||'Usuario')}</div>`;
+ if(m.responde_a && m.reply_text)html+=`<div class="reply-preview">${esc(m.reply_author||'Mensaje')}<br>${esc(m.reply_text)}</div>`;
+ if(m.tipo==='imagen'&&m.archivo_data)html+=`<img class="msg-image" src="${esc(m.archivo_data)}" alt="${esc(m.archivo_nombre||'imagen')}">`;
+ else if(m.tipo==='archivo'&&m.archivo_data)html+=`<a class="file-card" href="${esc(m.archivo_data)}" download="${esc(m.archivo_nombre||'archivo')}"><span class="file-icon">📄</span><span><span class="file-name">${esc(m.archivo_nombre||'archivo')}</span><br><span class="file-size">${formatBytes(m.archivo_tamano)}</span></span></a>`;
+ if(m.texto)html+=`<div class="msg-text">${textLinks(m.texto)}</div>`;
+ html+=`<span class="time">${m.fecha?new Date(m.fecha).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):''}</span>`;
+ html+=`<div class="msg-tools"><button class="tool" onclick='setReply(${JSON.stringify(m).replace(/'/g,"&#39;")})'>↩ Responder</button></div>`;
+ bubble.innerHTML=html;row.appendChild(bubble);$('messages').appendChild(row);$('messages').scrollTop=$('messages').scrollHeight;
+}
+socket.on('historial_cargado',data=>{
+ const msgs=Array.isArray(data)?data:data.mensajes||[];
+ if(!active)return;$('messages').innerHTML='';renderedIds.clear();msgs.forEach(renderMessage);
+});
+socket.on('recibir_mensaje',m=>{
+ if(m.emisor===user.id||m.receptor===user.id||active?.esGrupo){
+  if(active && m.clave_chat===active.id || active && !active.esGrupo && (m.emisor===active.id||m.receptor===active.id))renderMessage(m);
+ }
+ socket.emit('obtener_contactos',{id:user.id});
+});
+socket.on('mensaje_enviado_ok',m=>{if(active&&((active.esGrupo&&m.clave_chat===active.id)||(!active.esGrupo&&(m.emisor===active.id||m.receptor===active.id))))renderMessage(m)});
+socket.on('error_mensaje',r=>alert(r.mensaje||'No se pudo enviar el mensaje.'));
+
+function setReply(m){
+ replyTo=m;$('replyBar').classList.remove('hidden');$('replyName').textContent=m.nombreEmisor||'Usuario';$('replyText').textContent=m.texto||m.archivo_nombre||'Archivo';$('messageInput').focus();
+}
+function cancelReply(){replyTo=null;$('replyBar').classList.add('hidden')}
+$('messageInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
+
+async function prepareFile(){
+ const file=$('fileInput').files[0];if(!file)return;
+ if(file.size>MAX_FILE_BYTES)return alert('El archivo supera el límite de 20 MB.');
+ pendingFile=file;$('messageInput').placeholder='Archivo preparado: '+file.name;
+}
+const MAX_FILE_BYTES=20*1024*1024;
+async function sendMessage(){
+ if(!active)return;
+ const input=$('messageInput'),texto=input.value.trim();
+ if(!texto&&!pendingFile)return;
+ let archivo=null;
+ if(pendingFile){
+  const data=await imageToBase64(pendingFile,1200,.75);
+  archivo={data,nombre:pendingFile.name,tipo:pendingFile.type||'application/octet-stream',tamano:pendingFile.size};
+ }
+ socket.emit('mensaje_enviado',{
+  emisor:user.id,nombreEmisor:user.nombre,fotoEmisor:user.foto,receptor:active.id,
+  esGrupo:active.esGrupo?1:0,texto,tipo:archivo?(archivo.tipo.startsWith('image/')?'imagen':'archivo'):'texto',
+  archivo, responde_a:replyTo?.id||null
+ });
+ input.value='';pendingFile=null;$('fileInput').value='';input.placeholder='Escribe un mensaje…';cancelReply();
+}
+
+function addPerson(){const q=$('personInput').value.trim();if(!q)return;socket.emit('guardar_contacto',{mi_id:user.id,contacto_id:q});closeModal('addModal')}
+async function createGroup(){
+ const name=$('groupName').value.trim();if(!name)return alert('Escribe un nombre.');
+ const ids=$('groupMembers').value.split(',').map(x=>x.trim()).filter(Boolean);let foto=null;
+ if($('groupPhoto').files[0])foto=await imageToBase64($('groupPhoto').files[0],700,.7);
+ ids.push(user.id);socket.emit('crear_grupo',{nombre:name,foto,creador_id:user.id,miembros:[...new Set(ids)]});closeModal('addModal')
+}
+socket.on('contacto_resultado',r=>{if(!r.exito)alert(r.mensaje);else socket.emit('obtener_contactos',{id:user.id})});
+socket.on('grupo_creado_resultado',r=>{if(!r.exito)alert(r.mensaje||'Error');socket.emit('obtener_contactos',{id:user.id})});
+
+function openSettings(){
+ $('editName').value=user.nombre;$('editTheme').value=user.tema||'dark';$('editBrightness').value=user.brilloFondo??100;openModal('settingsModal')
+}
+async function saveSettings(){
+ let foto=user.foto||null,bg=user.fondoChat||null;
+ if($('editPhoto').files[0])foto=await imageToBase64($('editPhoto').files[0],700,.7);
+ if($('editBg').files[0])bg=await imageToBase64($('editBg').files[0],1200,.7);
+ socket.emit('actualizar_perfil',{id:user.id,nombre:$('editName').value.trim(),pass:$('editPass').value,
+  passActual:user.pass,foto,fondoChat:bg,tema:$('editTheme').value,brilloFondo:+$('editBrightness').value});
+}
+socket.on('perfil_actualizado',r=>{if(!r.exito)return alert(r.mensaje);user=r.usuario;localStorage.setItem('arxechat_user',JSON.stringify(user));closeModal('settingsModal');startApp()});
+function logout(){localStorage.removeItem('arxechat_user');location.reload()}
+</script>
 </body>
 </html>
 """
 
-@socketio.on('conectar_usuario')
-def conectar(data):
-    join_room(data['id'])
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = %s", (data['id'],))
-        for r in cursor.fetchall():
-            join_room(r['grupo_id'])
-
-@socketio.on('registrar_usuario')
-def registrar(data):
-    nombre = data['nombre']
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE nombre = %s", (nombre,))
-        row = cursor.fetchone()
-
-        if row:
-            # Corregido: antes, registrarse con un nombre ya existente sobrescribía
-            # la contraseña de esa cuenta sin comprobar nada (cualquiera podía
-            # "robar" una cuenta ajena solo con su nombre). Ahora se rechaza.
-            emit('auth_resultado', {
-                'exito': False,
-                'mensaje': 'Ese nombre de usuario ya existe. Inicia sesión o elige otro nombre.'
-            })
-            return
-
-        nuevo_id = str(random.randint(10000000, 99999999))
-        pass_hash = generate_password_hash(data['pass'])
-        cursor.execute(
-            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (nuevo_id, nombre, pass_hash, data.get('foto'), None, 'dark', 100)
-        )
-        conn.commit()
-
-        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (nuevo_id,))
-        nuevo_usuario = dict(cursor.fetchone())
-        nuevo_usuario.pop('pass', None)
-        nuevo_usuario['pass'] = data['pass']  # se devuelve en texto plano solo para guardar la sesión local
-
-        emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
-
-@socketio.on('login_usuario')
-def login(data):
-    nombre = data['nombre']
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE nombre = %s", (nombre,))
-        row = cursor.fetchone()
-
-        if row and check_password_hash(row['pass'], data['pass']):
-            usuario = dict(row)
-            usuario['pass'] = data['pass']  # se devuelve en texto plano solo para guardar la sesión local
-            emit('auth_resultado', {'exito': True, 'usuario': usuario})
-        else:
-            emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
-
-@socketio.on('actualizar_perfil')
-def actualizar_perfil(data):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
-        row = cursor.fetchone()
-        if not row:
-            emit('perfil_actualizado', {'exito': False, 'mensaje': 'Usuario no encontrado.'})
-            return
-
-        nuevo_nombre = data['nombre']
-        nueva_pass_hash = generate_password_hash(data['pass']) if data['pass'] else row['pass']
-        nueva_pass_plana = data['pass'] if data['pass'] else None
-        nueva_foto = data['foto']
-        nuevo_fondo = data.get('fondoChat')
-        nuevo_tema = data.get('tema', 'dark')
-        nuevo_brillo = data.get('brilloFondo', 100)
-
-        cursor.execute("""
-            UPDATE usuarios
-            SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s
-            WHERE id = %s
-        """, (nuevo_nombre, nueva_pass_hash, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
-        conn.commit()
-
-        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
-        u_updated = dict(cursor.fetchone())
-        # Para mantener la sesión local funcionando, se devuelve la contraseña en texto
-        # plano solo si el usuario la acaba de cambiar; si no, se conserva la que ya tenía el cliente.
-        if nueva_pass_plana:
-            u_updated['pass'] = nueva_pass_plana
-        else:
-            u_updated['pass'] = data.get('passActual', u_updated['pass'])
-        emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
-
-@socketio.on('crear_grupo')
-def crear_grupo(data):
-    grupo_id = "GRP_" + str(random.randint(10000000, 99999999))
-    nombre = data['nombre']
-    foto = data.get('foto')
-    creador_id = data['creador_id']
-    miembros = list(set(data.get('miembros', [])))
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (%s, %s, %s, %s)",
-                       (grupo_id, nombre, foto, creador_id))
-
-        for m_id in miembros:
-            cursor.execute("SELECT id FROM usuarios WHERE id = %s", (m_id,))
-            if cursor.fetchone():
-                aceptado = 1 if m_id == creador_id else 0
-                cursor.execute(
-                    "INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (grupo_id, usuario_id) DO NOTHING",
-                    (grupo_id, m_id, aceptado))
-        conn.commit()
-
-    join_room(grupo_id)
-    emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
-
-@socketio.on('anadir_miembro_grupo')
-def anadir_miembro_grupo(data):
-    grupo_id = data['grupo_id']
-    u_id = data['usuario_id']
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (u_id,))
-        if not cursor.fetchone():
-            emit('miembro_anadido_resultado', {'exito': False, 'mensaje': 'El usuario no existe.'})
-            return
-
-        cursor.execute(
-            "INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, 0) "
-            "ON CONFLICT (grupo_id, usuario_id) DO NOTHING",
-            (grupo_id, u_id))
-        conn.commit()
-
-    emit('miembro_anadido_resultado', {'exito': True})
-
-@socketio.on('obtener_detalles_grupo')
-def obtener_detalles_grupo(data):
-    grupo_id = data['grupo_id']
-    miembros = []
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT u.id, u.nombre, u.foto
-            FROM miembros_grupo mg
-            JOIN usuarios u ON mg.usuario_id = u.id
-            WHERE mg.grupo_id = %s
-        """, (grupo_id,))
-        miembros = [dict(r) for r in cursor.fetchall()]
-    emit('detalles_grupo_cargados', {'miembros': miembros})
-
-@socketio.on('actualizar_grupo')
-def actualizar_grupo(data):
-    grupo_id = data['grupo_id']
-    nombre = data['nombre']
-    foto = data.get('foto')
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if foto:
-            cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s", (nombre, foto, grupo_id))
-        else:
-            cursor.execute("UPDATE grupos SET nombre = %s WHERE id = %s", (nombre, grupo_id))
-        conn.commit()
-    emit('grupo_actualizado', {'exito': True})
-
-@socketio.on('aceptar_grupo')
-def aceptar_grupo(data):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = %s AND usuario_id = %s",
-                       (data['grupo_id'], data['usuario_id']))
-        conn.commit()
-    join_room(data['grupo_id'])
-    emit('grupo_aceptado', {'grupo_id': data['grupo_id']})
-
-@socketio.on('salir_grupo')
-def salir_grupo(data):
-    grupo_id = data['grupo_id']
-    usuario_id = data['usuario_id']
-    leave_room(grupo_id)
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s",
-                       (grupo_id, usuario_id))
-
-        cursor.execute("SELECT COUNT(*) as total FROM miembros_grupo WHERE grupo_id = %s", (grupo_id,))
-        count = cursor.fetchone()['total']
-
-        if count == 0:
-            cursor.execute("DELETE FROM grupos WHERE id = %s", (grupo_id,))
-            cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 1", (grupo_id,))
-
-        conn.commit()
-
-    obtener_contactos({'id': usuario_id})
-
-@socketio.on('eliminar_grupo_completo')
-def eliminar_grupo_completo(data):
-    grupo_id = data['grupo_id']
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s", (grupo_id,))
-        cursor.execute("DELETE FROM grupos WHERE id = %s", (grupo_id,))
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 1", (grupo_id,))
-        conn.commit()
-
-    emit('grupo_eliminado', room=grupo_id)
-
-@socketio.on('obtener_contactos')
-def obtener_contactos(data):
-    mi_id = data['id']
-    lista = []
-    ids_agregados = set()
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT u.id, u.nombre, u.foto
-            FROM contactos c
-            JOIN usuarios u ON c.contacto_id = u.id
-            WHERE c.mi_id = %s
-        """, (mi_id,))
-        for r in cursor.fetchall():
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False})
-            ids_agregados.add(r['id'])
-
-        cursor.execute("""
-            SELECT DISTINCT emisor, receptor
-            FROM mensajes
-            WHERE (emisor = %s OR receptor = %s) AND es_grupo = 0
-        """, (mi_id, mi_id))
-
-        for r in cursor.fetchall():
-            otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
-            if otro_id not in ids_agregados:
-                cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = %s", (otro_id,))
-                u = cursor.fetchone()
-                if u:
-                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False})
-                    ids_agregados.add(u['id'])
-
-        cursor.execute("""
-            SELECT g.id, g.nombre, g.foto, mg.aceptado
-            FROM miembros_grupo mg
-            JOIN grupos g ON mg.grupo_id = g.id
-            WHERE mg.usuario_id = %s
-        """, (mi_id,))
-        for r in cursor.fetchall():
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True})
-
-    emit('contactos_cargados', lista)
-
-@socketio.on('guardar_contacto')
-def guardar_contacto(data):
-    mi_id = data['mi_id']
-    contacto_id = data['contacto_id']
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (contacto_id,))
-        if not cursor.fetchone():
-            emit('contacto_resultado', {'exito': False, 'mensaje': 'El ID introducido no existe.'})
-            return
-
-        cursor.execute(
-            "INSERT INTO contactos (mi_id, contacto_id) VALUES (%s, %s) ON CONFLICT (mi_id, contacto_id) DO NOTHING",
-            (mi_id, contacto_id))
-        conn.commit()
-
-    emit('contacto_resultado', {'exito': True, 'mensaje': 'Contacto añadido.'})
-
-@socketio.on('eliminar_contacto')
-def eliminar_contacto(data):
-    mi_id = data['mi_id']
-    contacto_id = data['contacto_id']
-
-    clave_chat = "_".join(sorted([mi_id, contacto_id]))
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (mi_id, contacto_id))
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 0", (clave_chat,))
-        conn.commit()
-
-    obtener_contactos({'id': mi_id})
-
-@socketio.on('cargar_historial')
-def cargar_historial(data):
-    es_grupo = data.get('esGrupo', False)
-    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
-        historial = [dict(r) for r in cursor.fetchall()]
-
-    emit('historial_cargado', historial)
-
-@socketio.on('mensaje_enviado')
-def manejar_mensaje(data):
-    es_grupo = data.get('esGrupo', 0)
-    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
-        conn.commit()
-
-        # Destinatarios de la notificación push: el otro usuario (chat privado)
-        # o todos los miembros aceptados del grupo salvo quien envía (chat de grupo)
-        if es_grupo:
-            cursor.execute("SELECT usuario_id FROM miembros_grupo WHERE grupo_id = %s AND aceptado = 1", (data['receptor'],))
-            destinatarios = [r['usuario_id'] for r in cursor.fetchall()]
-        else:
-            destinatarios = [data['receptor']]
-
-    nuevo_msg = {
-        'clave_chat': clave_chat,
-        'emisor': data['emisor'],
-        'receptor': data['receptor'],
-        'texto': data['texto'],
-        'nombreEmisor': data['nombreEmisor'],
-        'fotoEmisor': data.get('fotoEmisor'),
-        'esGrupo': es_grupo
-    }
-
-    if es_grupo:
-        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
-    else:
-        emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
-        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
-
-    # Notificación push real: llega aunque el destinatario tenga la pestaña
-    # cerrada (siempre que el navegador la haya permitido y el SO no la bloquee).
-    for dest_id in destinatarios:
-        enviar_push_a_usuario(
-            dest_id,
-            data['emisor'],
-            titulo=data['nombreEmisor'],
-            cuerpo=data['texto'],
-            url='/'
-        )
-
-@socketio.on('guardar_subscripcion_push')
-def guardar_subscripcion_push(data):
-    """El navegador envía aquí la suscripción push (endpoint + claves) tras
-    pedir permiso de notificaciones, para poder avisar al usuario aunque
-    tenga la pestaña cerrada."""
-    usuario_id = data.get('usuario_id')
-    sub = data.get('subscription')
-    if not usuario_id or not sub:
-        return
-
-    endpoint = sub.get('endpoint')
-    keys = sub.get('keys', {})
-    p256dh = keys.get('p256dh')
-    auth = keys.get('auth')
-    if not endpoint or not p256dh or not auth:
-        return
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO push_subscriptions (usuario_id, endpoint, p256dh, auth)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (endpoint) DO UPDATE
-            SET usuario_id = EXCLUDED.usuario_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
-        """, (usuario_id, endpoint, p256dh, auth))
-        conn.commit()
-
-
-@app.route('/service-worker.js')
-def service_worker():
-    js = """
-self.addEventListener('push', function(event) {
-    let data = {};
-    try { data = event.data ? event.data.json() : {}; } catch (e) { data = {}; }
-    const title = data.title || 'Arxechat';
-    const options = {
-        body: data.body || '',
-        icon: data.icon || undefined,
-        badge: data.badge || undefined,
-        data: { url: data.url || '/' }
-    };
-    event.waitUntil(self.registration.showNotification(title, options));
-});
-
-self.addEventListener('notificationclick', function(event) {
-    event.notification.close();
-    const targetUrl = (event.notification.data && event.notification.data.url) || '/';
-    event.waitUntil(
-        clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
-            for (const client of clientList) {
-                if ('focus' in client) return client.focus();
-            }
-            if (clients.openWindow) return clients.openWindow(targetUrl);
-        })
-    );
-});
-"""
-    return app.response_class(js, mimetype='application/javascript')
-
-
-@app.route('/')
+@app.route("/")
 def home():
     return render_template_string(HTML_LAYOUT, vapid_public_key=VAPID_PUBLIC_KEY)
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
+
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
+
+
+@app.route("/service-worker.js")
+def service_worker():
+    js = """
+self.addEventListener("push", event => {
+    let data = {};
+    try { data = event.data ? event.data.json() : {}; } catch (_) {}
+    event.waitUntil(self.registration.showNotification(
+        data.title || "Arxechat",
+        { body: data.body || "Nuevo mensaje", data: {url: data.url || "/"} }
+    ));
+});
+self.addEventListener("notificationclick", event => {
+    event.notification.close();
+    event.waitUntil(clients.matchAll({type:"window", includeUncontrolled:true}).then(list => {
+        for (const client of list) {
+            if ("focus" in client) return client.focus();
+        }
+        if (clients.openWindow) return clients.openWindow(
+            event.notification.data?.url || "/"
+        );
+    }));
+});
+"""
+    return app.response_class(js, mimetype="application/javascript")
+
+
+@socketio.on("conectar_usuario")
+def conectar(data):
+    uid = str(data.get("id", ""))
+    if not uid:
+        return
+    join_room(uid)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT grupo_id FROM miembros_grupo WHERE usuario_id=%s AND aceptado=1",
+            (uid,),
+        )
+        for row in cur.fetchall():
+            join_room(row["grupo_id"])
+
+
+@socketio.on("registrar_usuario")
+def registrar(data):
+    nombre = str(data.get("nombre", "")).strip()
+    password = str(data.get("pass", ""))
+    if not nombre or not password:
+        return emit("auth_resultado", {"exito": False, "mensaje": "Faltan datos."})
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM usuarios WHERE LOWER(nombre)=LOWER(%s)", (nombre,))
+        if cur.fetchone():
+            return emit("auth_resultado", {"exito": False, "mensaje": "Ese usuario ya existe."})
+
+        nuevo_id = str(random.randint(10000000, 99999999))
+        cur.execute(
+            """INSERT INTO usuarios
+               (id,nombre,pass,foto,fondoChat,tema,brilloFondo)
+               VALUES (%s,%s,%s,%s,NULL,'dark',100)""",
+            (nuevo_id, nombre, generate_password_hash(password), data.get("foto")),
+        )
+        conn.commit()
+        cur.execute("SELECT * FROM usuarios WHERE id=%s", (nuevo_id,))
+        u = safe_user(cur.fetchone())
+        u["pass"] = password
+    emit("auth_resultado", {"exito": True, "usuario": u})
+
+
+@socketio.on("login_usuario")
+def login(data):
+    nombre = str(data.get("nombre", "")).strip()
+    password = str(data.get("pass", ""))
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM usuarios WHERE LOWER(nombre)=LOWER(%s)", (nombre,))
+        row = cur.fetchone()
+        if not row or not check_password_hash(row["pass"], password):
+            return emit("auth_resultado", {"exito": False, "mensaje": "Cuenta o contraseña incorrecta."})
+        u = dict(row)
+        u["pass"] = password
+    emit("auth_resultado", {"exito": True, "usuario": u})
+
+
+@socketio.on("actualizar_perfil")
+def actualizar_perfil(data):
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM usuarios WHERE id=%s", (data.get("id"),))
+        row = cur.fetchone()
+        if not row:
+            return emit("perfil_actualizado", {"exito": False, "mensaje": "Usuario no encontrado."})
+
+        new_pass = data.get("pass") or data.get("passActual", "")
+        pass_hash = generate_password_hash(new_pass) if data.get("pass") else row["pass"]
+
+        try:
+            cur.execute("""
+                UPDATE usuarios
+                SET nombre=%s,pass=%s,foto=%s,fondoChat=%s,tema=%s,brilloFondo=%s
+                WHERE id=%s
+            """, (
+                data.get("nombre") or row["nombre"], pass_hash,
+                data.get("foto"), data.get("fondoChat"),
+                data.get("tema", "dark"), int(data.get("brilloFondo", 100)),
+                data["id"],
+            ))
+            conn.commit()
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            return emit("perfil_actualizado", {"exito": False, "mensaje": "Ese nombre ya está en uso."})
+
+        cur.execute("SELECT * FROM usuarios WHERE id=%s", (data["id"],))
+        u = dict(cur.fetchone())
+        u["pass"] = new_pass
+    emit("perfil_actualizado", {"exito": True, "usuario": u})
+
+
+@socketio.on("obtener_contactos")
+def obtener_contactos(data):
+    uid = str(data.get("id"))
+    lista, seen = [], set()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT u.id,u.nombre,u.foto
+            FROM contactos c JOIN usuarios u ON u.id=c.contacto_id
+            WHERE c.mi_id=%s ORDER BY u.nombre
+        """, (uid,))
+        for r in cur.fetchall():
+            lista.append({"id":r["id"],"nombre":r["nombre"],"foto":r["foto"],"esGuardado":True,"esGrupo":False})
+            seen.add(r["id"])
+
+        cur.execute("""
+            SELECT DISTINCT emisor,receptor FROM mensajes
+            WHERE es_grupo=0 AND (emisor=%s OR receptor=%s)
+            ORDER BY GREATEST(emisor,receptor)
+        """, (uid,uid))
+        for r in cur.fetchall():
+            other = r["receptor"] if r["emisor"] == uid else r["emisor"]
+            if other in seen: continue
+            cur.execute("SELECT id,nombre,foto FROM usuarios WHERE id=%s",(other,))
+            u=cur.fetchone()
+            if u:
+                lista.append({"id":u["id"],"nombre":u["nombre"],"foto":u["foto"],"esGuardado":False,"esGrupo":False})
+                seen.add(other)
+
+        cur.execute("""
+            SELECT g.id,g.nombre,g.foto,mg.aceptado
+            FROM miembros_grupo mg JOIN grupos g ON g.id=mg.grupo_id
+            WHERE mg.usuario_id=%s ORDER BY g.nombre
+        """,(uid,))
+        for r in cur.fetchall():
+            lista.append({"id":r["id"],"nombre":r["nombre"],"foto":r["foto"],
+                          "esGuardado":bool(r["aceptado"]),"esGrupo":True})
+    emit("contactos_cargados", lista)
+
+
+@socketio.on("guardar_contacto")
+def guardar_contacto(data):
+    mi_id, contacto_id = str(data.get("mi_id")), str(data.get("contacto_id","")).strip()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("SELECT id FROM usuarios WHERE id=%s OR LOWER(nombre)=LOWER(%s)",(contacto_id,contacto_id))
+        row=cur.fetchone()
+        if not row:
+            return emit("contacto_resultado",{"exito":False,"mensaje":"No existe ese usuario."})
+        if row["id"]==mi_id:
+            return emit("contacto_resultado",{"exito":False,"mensaje":"No puedes añadirte a ti mismo."})
+        cur.execute("""INSERT INTO contactos(mi_id,contacto_id) VALUES(%s,%s)
+                       ON CONFLICT DO NOTHING""",(mi_id,row["id"]))
+        conn.commit()
+    emit("contacto_resultado",{"exito":True,"mensaje":"Contacto añadido."})
+
+
+@socketio.on("crear_grupo")
+def crear_grupo(data):
+    gid="GRP_"+uuid.uuid4().hex[:12]
+    miembros=list(dict.fromkeys(map(str,data.get("miembros",[]))))
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("INSERT INTO grupos(id,nombre,foto,creador_id) VALUES(%s,%s,%s,%s)",
+                    (gid,data.get("nombre","Grupo"),data.get("foto"),data["creador_id"]))
+        for uid in miembros:
+            cur.execute("SELECT id FROM usuarios WHERE id=%s",(uid,))
+            if cur.fetchone():
+                cur.execute("""INSERT INTO miembros_grupo(grupo_id,usuario_id,aceptado)
+                               VALUES(%s,%s,%s) ON CONFLICT DO NOTHING""",
+                            (gid,uid,1 if uid==data["creador_id"] else 0))
+        conn.commit()
+    join_room(gid)
+    emit("grupo_creado_resultado",{"exito":True,"grupo_id":gid})
+
+
+@socketio.on("aceptar_grupo")
+def aceptar_grupo(data):
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""UPDATE miembros_grupo SET aceptado=1
+                       WHERE grupo_id=%s AND usuario_id=%s""",
+                    (data["grupo_id"],data["usuario_id"]))
+        conn.commit()
+    join_room(data["grupo_id"])
+    emit("grupo_aceptado",{"grupo_id":data["grupo_id"]})
+
+
+@socketio.on("cargar_historial")
+def cargar_historial(data):
+    es_grupo=bool(data.get("esGrupo"))
+    clave=data["receptor"] if es_grupo else make_chat_key(data["emisor"],data["receptor"])
+
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""
+            SELECT m.*,
+                   r.nombre AS reply_author,
+                   r.texto AS reply_text
+            FROM mensajes m
+            LEFT JOIN mensajes r ON r.id=m.responde_a
+            WHERE m.clave_chat=%s
+            ORDER BY m.fecha ASC,m.id ASC
+        """,(clave,))
+        historial=[message_dict(r) for r in cur.fetchall()]
+    emit("historial_cargado",historial)
+
+
+@socketio.on("mensaje_enviado")
+def manejar_mensaje(data):
+    emisor=str(data.get("emisor"))
+    receptor=str(data.get("receptor"))
+    es_grupo=1 if data.get("esGrupo") else 0
+    texto=str(data.get("texto",""))[:10000]
+    tipo=data.get("tipo","texto")
+    archivo=data.get("archivo") or {}
+    responde_a=data.get("responde_a")
+
+    if tipo not in ("texto","imagen","archivo"):
+        tipo="texto"
+
+    if archivo:
+        raw=str(archivo.get("data",""))
+        if len(raw)>MAX_FILE_BYTES*2:
+            return emit("error_mensaje",{"mensaje":"El archivo es demasiado grande."})
+        archivo_data=raw
+        archivo_nombre=str(archivo.get("nombre","archivo"))[:255]
+        archivo_tipo=str(archivo.get("tipo","application/octet-stream"))[:150]
+        archivo_tamano=int(archivo.get("tamano",0) or 0)
+    else:
+        archivo_data=archivo_nombre=archivo_tipo=None
+        archivo_tamano=None
+
+    if not texto and not archivo_data:
+        return
+
+    clave=receptor if es_grupo else make_chat_key(emisor,receptor)
+
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""
+            INSERT INTO mensajes
+            (clave_chat,emisor,receptor,texto,nombreEmisor,fotoEmisor,es_grupo,
+             tipo,archivo_nombre,archivo_tipo,archivo_tamano,archivo_data,responde_a)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *
+        """,(
+            clave,emisor,receptor,texto,data.get("nombreEmisor"),
+            data.get("fotoEmisor"),es_grupo,tipo,archivo_nombre,archivo_tipo,
+            archivo_tamano,archivo_data,responde_a
+        ))
+        row=cur.fetchone()
+        conn.commit()
+
+        if es_grupo:
+            cur.execute("""SELECT usuario_id FROM miembros_grupo
+                           WHERE grupo_id=%s AND aceptado=1 AND usuario_id<>%s""",
+                        (receptor,emisor))
+            destinatarios=[r["usuario_id"] for r in cur.fetchall()]
+        else:
+            destinatarios=[receptor]
+
+        cur.execute("""SELECT r.nombre AS reply_author,r.texto AS reply_text
+                       FROM mensajes m LEFT JOIN mensajes r ON r.id=m.responde_a
+                       WHERE m.id=%s""",(row["id"],))
+        reply=cur.fetchone()
+
+    msg=message_dict(row)
+    msg["reply_author"]=reply["reply_author"] if reply else None
+    msg["reply_text"]=reply["reply_text"] if reply else None
+
+    if es_grupo:
+        emit("recibir_mensaje",msg,room=receptor)
+    else:
+        emit("recibir_mensaje",msg,room=emisor)
+        emit("recibir_mensaje",msg,room=receptor)
+
+    # Confirmación separada para el emisor: permite pintar el mensaje
+    # aunque el evento de la sala llegue con un pequeño retraso.
+    emit("mensaje_enviado_ok",msg)
+
+    cuerpo=texto if texto else ("📷 Imagen" if tipo=="imagen" else "📎 "+(archivo_nombre or "Archivo"))
+    for dest in destinatarios:
+        notify_user(dest,emisor,data.get("nombreEmisor","Arxechat"),cuerpo)
+
+
+@socketio.on("guardar_subscripcion_push")
+def guardar_subscripcion_push(data):
+    sub=data.get("subscription") or {}
+    keys=sub.get("keys") or {}
+    if not data.get("usuario_id") or not sub.get("endpoint") or not keys.get("p256dh") or not keys.get("auth"):
+        return
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""
+            INSERT INTO push_subscriptions(usuario_id,endpoint,p256dh,auth)
+            VALUES(%s,%s,%s,%s)
+            ON CONFLICT(endpoint) DO UPDATE
+            SET usuario_id=EXCLUDED.usuario_id,p256dh=EXCLUDED.p256dh,auth=EXCLUDED.auth
+        """,(data["usuario_id"],sub["endpoint"],keys["p256dh"],keys["auth"]))
+        conn.commit()
+
+
+if __name__=="__main__":
+    port=int(os.environ.get("PORT",5000))
+    socketio.run(app,host="0.0.0.0",port=port,allow_unsafe_werkzeug=True)
