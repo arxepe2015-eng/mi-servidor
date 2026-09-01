@@ -2,11 +2,11 @@ import os
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 
-# Forzamos la localización de la carpeta de plantillas
-base_dir = os.path.abspath(os.path.dirname(__file__))
-template_dir = os.path.join(base_dir, 'templates')
+# Asegurar la ruta absoluta del directorio base y de las plantillas
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 
-app = Flask(__name__, template_folder=template_dir)
+app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
