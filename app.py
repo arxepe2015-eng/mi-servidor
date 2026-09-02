@@ -1253,7 +1253,7 @@ HTML_LAYOUT = """
 
         function formatearTextoConLinks(texto) {
             if (texto.startsWith('<img') || texto.startsWith('📁 <a')) return texto;
-            const urlRegex = /(https?:\/\/[^\s]+)/g;
+            const urlRegex = /(https?:\\\\/\/[^\s]+)/g;
             return texto.replace(urlRegex, function(url) {
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
             });
