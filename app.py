@@ -1,9 +1,12 @@
 import os
 import random
+import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from flask import Flask, render_template_string
+from psycopg2.pool import ThreadedConnectionPool
+from flask import Flask, render_template_string, jsonify, Response
 from flask_socketio import SocketIO, emit
+from pywebpush import webpush, WebPushException
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
@@ -11,10 +14,102 @@ app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
+VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '').strip()
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '').strip()
+VAPID_SUBJECT = os.environ.get('VAPID_SUBJECT', 'mailto:admin@arxechat.local').strip()
+
+DB_POOL = None
+if DATABASE_URL:
+    DB_POOL = ThreadedConnectionPool(1, 5, DATABASE_URL, cursor_factory=RealDictCursor, options='-c timezone=UTC')
+
+class PooledConnection:
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+        self._returned = False
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+    def close(self):
+        if self._returned:
+            return
+        self._returned = True
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+        self._pool.putconn(self._conn)
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return conn
+    if not DB_POOL:
+        raise RuntimeError('DATABASE_URL no está configurada.')
+    conn = DB_POOL.getconn()
+    try:
+        return PooledConnection(DB_POOL, conn)
+    except Exception:
+        DB_POOL.putconn(conn, close=True)
+        raise
+
+def usuario_publico(row):
+    if not row:
+        return None
+    u = dict(row)
+    u['fondoChat'] = u.get('fondoChat', u.get('fondochat'))
+    u['brilloFondo'] = u.get('brilloFondo', u.get('brillofondo', 100))
+    return u
+
+def enviar_push_a_usuario(usuario_id, payload):
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY or not VAPID_SUBJECT:
+        return
+
+    conn = None
+    try:
+        # No mantener una conexión PostgreSQL abierta mientras se habla con el servicio push.
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE usuario_id = %s", (usuario_id,))
+        subscriptions = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        conn = None
+
+        expired_endpoints = []
+        for sub in subscriptions:
+            subscription_info = {
+                'endpoint': sub['endpoint'],
+                'keys': {'p256dh': sub['p256dh'], 'auth': sub['auth']},
+            }
+            try:
+                webpush(
+                    subscription_info=subscription_info,
+                    data=json.dumps(payload, ensure_ascii=False),
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={'sub': VAPID_SUBJECT},
+                    ttl=60,
+                    timeout=5,
+                )
+            except WebPushException as exc:
+                status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                if status in (404, 410):
+                    expired_endpoints.append(sub['endpoint'])
+
+        if expired_endpoints:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM push_subscriptions WHERE endpoint = ANY(%s)", (expired_endpoints,))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            conn = None
+    except Exception as exc:
+        print(f'Error enviando push a {usuario_id}: {exc}')
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn:
+            conn.close()
 
 def init_db():
     if not DATABASE_URL:
@@ -80,6 +175,24 @@ def init_db():
         )
     ''')
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_clave_chat ON mensajes (clave_chat)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_clave_fecha ON mensajes (clave_chat, fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_no_leidos ON mensajes (leido, clave_chat, emisor)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_receptor_leido ON mensajes (receptor, leido, clave_chat)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contactos_mi_id ON contactos (mi_id, contacto_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_miembros_grupo_usuario ON miembros_grupo (usuario_id, grupo_id)")
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+            id SERIAL PRIMARY KEY,
+            usuario_id TEXT NOT NULL,
+            endpoint TEXT UNIQUE NOT NULL,
+            p256dh TEXT NOT NULL,
+            auth TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_push_subscriptions_usuario ON push_subscriptions (usuario_id)")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_vaciado (
@@ -104,6 +217,8 @@ HTML_LAYOUT = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Arxechat</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#00a884">
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <style>
         :root {
@@ -164,6 +279,8 @@ HTML_LAYOUT = """
         .user-info-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; background: none; border: none; text-align: left; color: var(--text-main); }
         .user-avatar { width: 42px; height: 42px; border-radius: 50%; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 1.2rem; color: white; object-fit: cover; flex-shrink: 0; }
         .add-btn { background: var(--accent); border: none; color: white; width: 40px; height: 40px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
+        .notify-btn { background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); width: 40px; height: 40px; border-radius: 50%; font-size: 1.15rem; cursor: pointer; display: flex; justify-content: center; align-items: center; }
+        .notify-btn.active { border-color: var(--accent); color: var(--accent); }
         .contacts-list { flex: 1; overflow-y: auto; }
         .contact-item { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border-color); cursor: pointer; gap: 12px; background: transparent; width: 100%; border-left: none; border-right: none; border-top: none; text-align: left; color: var(--text-main); }
         .contact-item:hover, .contact-item:active { background: var(--bg-header); }
@@ -192,7 +309,8 @@ HTML_LAYOUT = """
         
         .msg-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-size: 0.75rem; color: white; font-weight: bold; }
         
-        .message { padding: 8px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); position: relative; width: 100%; }
+        .message { padding: 8px 12px 6px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); position: relative; width: 100%; }
+        .message-time { float: right; margin: 4px 0 0 10px; font-size: 0.68rem; line-height: 1; color: var(--text-sub); white-space: nowrap; opacity: 0.95; user-select: none; }
         .message.received { background: var(--msg-recv); border-top-left-radius: 0; }
         .message.sent { background: var(--msg-sent); border-top-right-radius: 0; }
         .message .sender-name { font-size: 0.75rem; font-weight: bold; color: var(--accent); margin-bottom: 3px; display: block; }
@@ -399,7 +517,10 @@ HTML_LAYOUT = """
                         <div id="myID" style="font-size:0.75rem; color: var(--accent);">ID: --------</div>
                     </div>
                 </button>
-                <button type="button" class="add-btn" onclick="abrirModalChoice()" title="Añadir algo">+</button>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button type="button" class="notify-btn" id="notifyBtn" onclick="activarNotificaciones()" title="Activar notificaciones">🔔</button>
+                    <button type="button" class="add-btn" onclick="abrirModalChoice()" title="Añadir algo">+</button>
+                </div>
             </div>
             <div class="contacts-list" id="contactsList"></div>
         </div>
@@ -445,6 +566,9 @@ HTML_LAYOUT = """
         let miUsuario = null;
         let contactoActivo = null;
         let misContactos = [];
+        let pushSubscriptionActiva = false;
+        let pushRegistration = null;
+        let vapidPublicKey = '';
 
         // Variables del Editor de Imagen
         let editorTargetType = null; // 'foto' o 'fondo'
@@ -479,6 +603,70 @@ HTML_LAYOUT = """
         window.addEventListener('resize', ajustarLayoutSegunAncho);
         window.addEventListener('orientationchange', ajustarLayoutSegunAncho);
 
+        function urlBase64ToUint8Array(base64String) {
+            const padding = '='.repeat((4 - base64String.length % 4) % 4);
+            const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+            const rawData = atob(base64);
+            return Uint8Array.from([...rawData].map(char => char.charCodeAt(0)));
+        }
+
+        async function configurarNotificacionesPush() {
+            const btn = document.getElementById('notifyBtn');
+            if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+                btn.style.display = 'none';
+                return;
+            }
+            try {
+                const configRes = await fetch('/push-public-key', { cache: 'no-store' });
+                const config = await configRes.json();
+                vapidPublicKey = config.publicKey || '';
+                if (!vapidPublicKey) {
+                    btn.title = 'Notificaciones no configuradas en el servidor';
+                    return;
+                }
+                pushRegistration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
+                await navigator.serviceWorker.ready;
+                if (Notification.permission !== 'granted') {
+                    btn.classList.remove('active');
+                    btn.title = Notification.permission === 'denied'
+                        ? 'Notificaciones bloqueadas en el navegador'
+                        : 'Pulsa para activar las notificaciones';
+                    return;
+                }
+                let subscription = await pushRegistration.pushManager.getSubscription();
+                if (!subscription) {
+                    subscription = await pushRegistration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey)
+                    });
+                }
+                socket.emit('guardar_suscripcion_push', {
+                    usuario_id: miUsuario.id,
+                    subscription: subscription.toJSON()
+                });
+                pushSubscriptionActiva = true;
+                btn.classList.add('active');
+                btn.title = 'Notificaciones activadas';
+            } catch (error) {
+                console.warn('No se pudo configurar Web Push:', error);
+                pushSubscriptionActiva = false;
+                btn.classList.remove('active');
+            }
+        }
+
+        async function activarNotificaciones() {
+            if (!('Notification' in window)) {
+                alert('Este navegador no admite notificaciones web.');
+                return;
+            }
+            if (Notification.permission === 'denied') {
+                alert('Las notificaciones están bloqueadas para esta web. Actívalas en los permisos del navegador.');
+                return;
+            }
+            const permission = await Notification.requestPermission();
+            if (permission === 'granted') await configurarNotificacionesPush();
+        }
+
         window.onload = () => {
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
             if (sesionGuardada) {
@@ -499,26 +687,27 @@ HTML_LAYOUT = """
                 document.body.classList.remove('light-theme');
             }
 
-            // Aplicar colores personalizados de mensajes
+            const bodyStyle = document.body.style;
             if (miUsuario && miUsuario.color_sent && miUsuario.color_sent !== 'default') {
-                document.documentElement.style.setProperty('--msg-sent', miUsuario.color_sent);
+                bodyStyle.setProperty('--msg-sent', miUsuario.color_sent);
             } else {
-                document.documentElement.style.removeProperty('--msg-sent');
+                bodyStyle.removeProperty('--msg-sent');
             }
-
             if (miUsuario && miUsuario.color_recv && miUsuario.color_recv !== 'default') {
-                document.documentElement.style.setProperty('--msg-recv', miUsuario.color_recv);
+                bodyStyle.setProperty('--msg-recv', miUsuario.color_recv);
             } else {
-                document.documentElement.style.removeProperty('--msg-recv');
+                bodyStyle.removeProperty('--msg-recv');
             }
 
             const bgOverlay = document.getElementById('chatBgOverlay');
-            if (miUsuario && miUsuario.fondoChat) {
-                bgOverlay.style.backgroundImage = `url('${miUsuario.fondoChat}')`;
-                const opacidad = (miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100) / 100;
-                bgOverlay.style.opacity = opacidad;
+            const fondo = miUsuario && (miUsuario.fondoChat || miUsuario.fondochat);
+            if (fondo) {
+                bgOverlay.style.backgroundImage = `url("${fondo}")`;
+                const brillo = miUsuario.brilloFondo ?? miUsuario.brillofondo ?? 100;
+                bgOverlay.style.opacity = Math.max(0.1, Math.min(1, Number(brillo) / 100));
             } else {
                 bgOverlay.style.backgroundImage = 'none';
+                bgOverlay.style.opacity = '1';
             }
         }
 
@@ -630,7 +819,7 @@ HTML_LAYOUT = """
             }
 
             aplicarTema();
-            solicitarPermisoNotificaciones();
+            configurarNotificacionesPush();
             
             socket.emit('conectar_usuario', { id: miUsuario.id });
             socket.emit('obtener_contactos', { id: miUsuario.id });
@@ -861,7 +1050,7 @@ HTML_LAYOUT = """
         function abrirAjustes() {
             document.getElementById('editName').value = miUsuario.nombre;
             document.getElementById('editTheme').value = miUsuario.tema || 'dark';
-            const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100;
+            const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : (miUsuario.brillofondo !== undefined ? miUsuario.brillofondo : 100);
             document.getElementById('editBrillo').value = brillo;
             document.getElementById('brilloVal').innerText = brillo;
 
@@ -1247,6 +1436,15 @@ HTML_LAYOUT = """
             location.reload();
         }
 
+        socket.on('push_suscripcion_resultado', (res) => {
+            if (res.exito) {
+                pushSubscriptionActiva = true;
+                const btn = document.getElementById('notifyBtn');
+                btn.classList.add('active');
+                btn.title = 'Notificaciones activadas';
+            }
+        });
+
         socket.on('contacto_resultado', (res) => {
             if(!res.exito) {
                 alert(res.mensaje);
@@ -1395,7 +1593,12 @@ HTML_LAYOUT = """
                 senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
             }
 
-            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}`;
+            const rawFecha = msg.fecha || new Date().toISOString();
+            const fechaObj = new Date(rawFecha);
+            const horaLocal = Number.isNaN(fechaObj.getTime())
+                ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : fechaObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}</span>`;
             
             rowDiv.innerHTML = avatarHtml;
             rowDiv.appendChild(msgElement);
@@ -1433,7 +1636,7 @@ HTML_LAYOUT = """
                 socket.emit('obtener_contactos', { id: miUsuario.id });
             }
 
-            if (data.emisor !== miUsuario.id && Notification.permission === "granted") {
+            if (data.emisor !== miUsuario.id && !pushSubscriptionActiva && Notification.permission === "granted") {
                 let prevText = data.texto;
                 if(prevText.startsWith('<img')) prevText = '📷 Foto adjunta';
                 else if(prevText.startsWith('📁 <a')) prevText = '📁 Archivo adjunto';
@@ -1453,6 +1656,7 @@ HTML_LAYOUT = """
                     receptor: contactoActivo.id,
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto,
+                    nombreGrupo: contactoActivo.esGrupo ? contactoActivo.nombre : undefined,
                     tempId: tempId
                 };
 
@@ -1506,6 +1710,7 @@ HTML_LAYOUT = """
                     receptor: contactoActivo.id,
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto,
+                    nombreGrupo: contactoActivo.esGrupo ? contactoActivo.nombre : undefined,
                     tempId: tempId
                 };
                 renderizarMensaje(msgOptimista, tempId);
@@ -1520,6 +1725,60 @@ HTML_LAYOUT = """
 </body>
 </html>
 """
+
+@app.route('/service-worker.js')
+def service_worker():
+    js = r"""
+self.addEventListener('push', (event) => {
+    let data = {};
+    try { data = event.data ? event.data.json() : {}; }
+    catch (e) { data = { title: 'Arxechat', body: event.data ? event.data.text() : 'Nuevo mensaje' }; }
+    const options = {
+        body: data.body || 'Tienes un mensaje nuevo',
+        icon: '/icon.svg',
+        badge: '/icon.svg',
+        tag: data.tag || 'arxechat-message',
+        renotify: true,
+        data: { url: data.url || '/' }
+    };
+    event.waitUntil(self.registration.showNotification(data.title || 'Arxechat', options));
+});
+self.addEventListener('notificationclick', (event) => {
+    event.notification.close();
+    const targetUrl = (event.notification.data && event.notification.data.url) || '/';
+    event.waitUntil((async () => {
+        const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const client of clientList) {
+            if ('focus' in client) {
+                await client.focus();
+                if ('navigate' in client && new URL(client.url).origin === self.location.origin) await client.navigate(targetUrl);
+                return;
+            }
+        }
+        if (clients.openWindow) await clients.openWindow(targetUrl);
+    })());
+});
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+""".strip()
+    return Response(js, mimetype='application/javascript')
+
+@app.route('/manifest.json')
+def manifest():
+    return jsonify({
+        'name': 'Arxechat', 'short_name': 'Arxechat', 'start_url': '/',
+        'display': 'standalone', 'background_color': '#111b21', 'theme_color': '#00a884',
+        'icons': [{'src': '/icon.svg', 'sizes': 'any', 'type': 'image/svg+xml', 'purpose': 'any maskable'}]
+    })
+
+@app.route('/icon.svg')
+def icon():
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128" rx="28" fill="#00a884"/><path d="M24 26h80a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H56l-22 16 4-16h-14a12 12 0 0 1-12-12V38a12 12 0 0 1 12-12Z" fill="#fff"/><circle cx="42" cy="62" r="6" fill="#00a884"/><circle cx="64" cy="62" r="6" fill="#00a884"/><circle cx="86" cy="62" r="6" fill="#00a884"/></svg>'
+    return Response(svg, mimetype='image/svg+xml')
+
+@app.route('/push-public-key')
+def push_public_key():
+    return jsonify({'publicKey': VAPID_PUBLIC_KEY})
 
 @app.route('/')
 def home():
@@ -1537,6 +1796,33 @@ def conectar(data):
         join_room(r['grupo_id'])
     cursor.close()
     conn.close()
+
+@socketio.on('guardar_suscripcion_push')
+def guardar_suscripcion_push(data):
+    usuario_id = data.get('usuario_id')
+    subscription = data.get('subscription') or {}
+    endpoint = subscription.get('endpoint')
+    keys = subscription.get('keys') or {}
+    p256dh = keys.get('p256dh')
+    auth = keys.get('auth')
+    if not usuario_id or not endpoint or not p256dh or not auth:
+        emit('push_suscripcion_resultado', {'exito': False})
+        return
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO push_subscriptions (usuario_id, endpoint, p256dh, auth, updated_at)
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (endpoint) DO UPDATE SET
+            usuario_id = EXCLUDED.usuario_id,
+            p256dh = EXCLUDED.p256dh,
+            auth = EXCLUDED.auth,
+            updated_at = CURRENT_TIMESTAMP
+    """, (usuario_id, endpoint, p256dh, auth))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    emit('push_suscripcion_resultado', {'exito': True})
 
 @socketio.on('registrar_usuario')
 def registrar(data):
@@ -1558,7 +1844,7 @@ def registrar(data):
     conn.commit()
     
     cursor.execute("SELECT * FROM usuarios WHERE id = %s", (nuevo_id,))
-    nuevo_usuario = dict(cursor.fetchone())
+    nuevo_usuario = usuario_publico(cursor.fetchone())
     cursor.close()
     conn.close()
 
@@ -1575,7 +1861,7 @@ def login(data):
     conn.close()
     
     if row and row['pass'] == data['pass']:
-        usuario = dict(row)
+        usuario = usuario_publico(row)
         emit('auth_resultado', {'exito': True, 'usuario': usuario})
     else:
         emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
@@ -1609,7 +1895,7 @@ def actualizar_perfil(data):
     conn.commit()
 
     cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
-    u_updated = dict(cursor.fetchone())
+    u_updated = usuario_publico(cursor.fetchone())
     cursor.close()
     conn.close()
     
@@ -1807,11 +2093,20 @@ def obtener_contactos(data):
     # (con 15-20 chats, eran 15-20 idas y vueltas a la base de datos = varios segundos).
     # Ahora se calculan todos los no leídos en una sola consulta agrupada.
     cursor.execute("""
-        SELECT clave_chat, COUNT(*) as unread
-        FROM mensajes
-        WHERE emisor != %s AND leido = 0
-        GROUP BY clave_chat
-    """, (mi_id,))
+        SELECT m.clave_chat, COUNT(*) as unread
+        FROM mensajes m
+        WHERE m.leido = 0
+          AND m.emisor != %s
+          AND (
+              (m.es_grupo = 0 AND m.receptor = %s)
+              OR
+              (m.es_grupo = 1 AND EXISTS (
+                  SELECT 1 FROM miembros_grupo mg
+                  WHERE mg.grupo_id = m.clave_chat AND mg.usuario_id = %s
+              ))
+          )
+        GROUP BY m.clave_chat
+    """, (mi_id, mi_id, mi_id))
     unread_por_clave = {r['clave_chat']: r['unread'] for r in cursor.fetchall()}
 
     cursor.execute("""
@@ -1938,11 +2233,11 @@ def cargar_historial(data):
     conn.commit()
 
     if es_grupo:
-        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -1952,12 +2247,17 @@ def cargar_historial(data):
             ORDER BY m.fecha ASC
         """, (clave_chat, clave_chat, mi_id))
 
-    historial = [dict(r) for r in cursor.fetchall()]
+    historial = []
+    for r in cursor.fetchall():
+        item = dict(r)
+        if item.get('fecha'):
+            fecha = item['fecha']
+            item['fecha'] = fecha.isoformat() + ('Z' if fecha.tzinfo is None else '')
+        historial.append(item)
     cursor.close()
     conn.close()
 
     emit('historial_cargado', historial)
-    obtener_contactos({'id': mi_id})
 
 @socketio.on('marcar_leido')
 def marcar_leido(data):
@@ -1971,7 +2271,6 @@ def marcar_leido(data):
     conn.commit()
     cursor.close()
     conn.close()
-    obtener_contactos({'id': mi_id})
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
@@ -1983,12 +2282,15 @@ def manejar_mensaje(data):
     cursor.execute("""
         INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido)
         VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+        RETURNING id, fecha
     """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
+    saved = cursor.fetchone()
     conn.commit()
     cursor.close()
     conn.close()
 
     nuevo_msg = {
+        'id': saved['id'],
         'clave_chat': clave_chat,
         'emisor': data['emisor'],
         'receptor': data['receptor'],
@@ -1996,6 +2298,7 @@ def manejar_mensaje(data):
         'nombreEmisor': data['nombreEmisor'],
         'fotoEmisor': data.get('fotoEmisor'),
         'esGrupo': es_grupo,
+        'fecha': (saved['fecha'].isoformat() + ('Z' if saved['fecha'].tzinfo is None else '')) if saved['fecha'] else None,
         'tempId': data.get('tempId')
     }
 
@@ -2004,6 +2307,36 @@ def manejar_mensaje(data):
     else:
         emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
         emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+
+    if es_grupo:
+        push_conn = get_db()
+        push_cursor = push_conn.cursor()
+        push_cursor.execute("""
+            SELECT usuario_id FROM miembros_grupo
+            WHERE grupo_id = %s AND usuario_id != %s AND aceptado = 1
+        """, (data['receptor'], data['emisor']))
+        push_recipients = [r['usuario_id'] for r in push_cursor.fetchall()]
+        push_cursor.close()
+        push_conn.close()
+        push_title = data['nombreEmisor'] + ' en ' + data.get('nombreGrupo', 'el grupo')
+    else:
+        push_recipients = [data['receptor']] if data['receptor'] != data['emisor'] else []
+        push_title = 'Mensaje de ' + data['nombreEmisor']
+
+    push_body = data['texto'] or 'Nuevo mensaje'
+    if push_body.startswith('<img'):
+        push_body = '📷 Foto adjunta'
+    elif push_body.startswith('📁 <a'):
+        push_body = '📁 Archivo adjunto'
+
+    push_payload = {
+        'title': push_title,
+        'body': push_body[:180],
+        'url': '/',
+        'tag': 'arxechat-' + str(clave_chat),
+    }
+    for recipient_id in set(push_recipients):
+        socketio.start_background_task(enviar_push_a_usuario, recipient_id, push_payload)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
