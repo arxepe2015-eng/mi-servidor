@@ -235,7 +235,6 @@ HTML_LAYOUT = """
     <meta property="og:description" content="Mensajería web rápida con chats privados, grupos y notificaciones.">
     <meta property="og:image" content="/favicon.png">
     <meta property="og:type" content="website">
-    <meta name="google-site-verification" content="wGjP2V2leY-mXZ5JyLAvWNo9TLzb9IKNwJt15ckhPu4" />
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -517,6 +516,8 @@ HTML_LAYOUT = """
 
             <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
+            <hr style="margin: 15px 0; border-color: var(--border-color);">
+            <button type="button" class="btn-action btn-danger" id="btnEliminarCuenta" onclick="eliminarMiCuenta()">Eliminar cuenta permanentemente</button>
         </div>
     </div>
 
@@ -1537,6 +1538,58 @@ HTML_LAYOUT = """
             location.reload();
         }
 
+        function eliminarMiCuenta() {
+            if (!miUsuario || !miUsuario.id) return;
+
+            const aviso1 = confirm(
+                "¿ESTÁS SEGURO DE QUE QUIERES BORRAR TU CUENTA?\n\n" +
+                "Tu perfil, contactos, mensajes privados, suscripciones de notificaciones y los datos de los grupos que hayas creado se eliminarán permanentemente.\n\n" +
+                "Esta acción NO se puede deshacer."
+            );
+            if (!aviso1) return;
+
+            const aviso2 = confirm(
+                "ÚLTIMO AVISO\n\n" +
+                "Al pulsar Aceptar, tu cuenta se borrará definitivamente de la base de datos.\n" +
+                "No podrás recuperar esta cuenta ni sus datos después.\n\n" +
+                "¿Quieres continuar y BORRAR LA CUENTA?"
+            );
+            if (!aviso2) return;
+
+            const btn = document.getElementById('btnEliminarCuenta');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = 'Borrando cuenta...';
+            }
+
+            socket.emit('eliminar_cuenta', { usuario_id: miUsuario.id });
+        }
+
+        socket.on('cuenta_eliminada_resultado', (res) => {
+            const btn = document.getElementById('btnEliminarCuenta');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerText = 'Eliminar cuenta permanentemente';
+            }
+
+            if (!res.exito) {
+                alert(res.mensaje || 'No se ha podido borrar la cuenta.');
+                return;
+            }
+
+            localStorage.removeItem('arxechat_sesion');
+            miUsuario = null;
+            contactoActivo = null;
+            alert('Tu cuenta se ha eliminado permanentemente.');
+            location.reload();
+        });
+
+        socket.on('cuenta_eliminada', () => {
+            // Si el usuario tenía otra pestaña/dispositivo conectado, también se fuerza a salir.
+            localStorage.removeItem('arxechat_sesion');
+            location.reload();
+        });
+
         socket.on('push_suscripcion_resultado', (res) => {
             if (res.exito) {
                 pushSubscriptionActiva = true;
@@ -2132,6 +2185,72 @@ def actualizar_perfil(data):
     conn.close()
     
     emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
+
+@socketio.on('eliminar_cuenta')
+def eliminar_cuenta(data):
+    usuario_id = data.get('usuario_id')
+    if not usuario_id:
+        emit('cuenta_eliminada_resultado', {'exito': False, 'mensaje': 'Datos incompletos.'})
+        return
+
+    conn = get_db()
+    cursor = conn.cursor()
+    grupos_creados = []
+
+    try:
+        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (usuario_id,))
+        if not cursor.fetchone():
+            emit('cuenta_eliminada_resultado', {'exito': False, 'mensaje': 'La cuenta ya no existe.'})
+            return
+
+        # Guardamos los grupos creados por la cuenta para limpiar también sus mensajes
+        # y miembros antes de eliminar los grupos.
+        cursor.execute("SELECT id FROM grupos WHERE creador_id = %s", (usuario_id,))
+        grupos_creados = [r['id'] for r in cursor.fetchall()]
+
+        if grupos_creados:
+            cursor.execute("DELETE FROM mensajes WHERE es_grupo = 1 AND clave_chat = ANY(%s)", (grupos_creados,))
+            cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ANY(%s)", (grupos_creados,))
+            cursor.execute("DELETE FROM grupos WHERE id = ANY(%s)", (grupos_creados,))
+
+        # Mensajes privados enviados o recibidos por la cuenta.
+        cursor.execute("DELETE FROM mensajes WHERE es_grupo = 0 AND (emisor = %s OR receptor = %s)", (usuario_id, usuario_id))
+
+        # Relaciones de contactos.
+        cursor.execute("DELETE FROM contactos WHERE mi_id = %s OR contacto_id = %s", (usuario_id, usuario_id))
+
+        # Membresías en grupos que no creó la cuenta.
+        cursor.execute("DELETE FROM miembros_grupo WHERE usuario_id = %s", (usuario_id,))
+
+        # Marcas de conversaciones vaciadas relacionadas con esta cuenta.
+        cursor.execute(
+            "DELETE FROM chat_vaciado WHERE usuario_id = %s OR clave_chat = %s OR clave_chat LIKE %s OR clave_chat LIKE %s",
+            (usuario_id, usuario_id, usuario_id + '_%', '%_' + usuario_id)
+        )
+
+        # Suscripciones Web Push de todos sus dispositivos.
+        cursor.execute("DELETE FROM push_subscriptions WHERE usuario_id = %s", (usuario_id,))
+
+        # Finalmente, eliminamos el perfil.
+        cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
+        if cursor.rowcount != 1:
+            raise RuntimeError('No se pudo eliminar el perfil.')
+
+        conn.commit()
+
+        # Cerramos la sesión de todas las conexiones de esta cuenta que estén conectadas.
+        socketio.emit('cuenta_eliminada', {}, room=usuario_id)
+        for grupo_id in grupos_creados:
+            socketio.emit('grupo_eliminado', {'grupo_id': grupo_id}, room=grupo_id)
+
+        emit('cuenta_eliminada_resultado', {'exito': True})
+    except Exception as exc:
+        conn.rollback()
+        print(f'Error eliminando la cuenta {usuario_id}: {exc}')
+        emit('cuenta_eliminada_resultado', {'exito': False, 'mensaje': 'No se ha podido eliminar la cuenta. No se ha borrado ningún dato.'})
+    finally:
+        cursor.close()
+        conn.close()
 
 @socketio.on('crear_grupo')
 def crear_grupo(data):
