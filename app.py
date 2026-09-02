@@ -1735,9 +1735,20 @@ HTML_LAYOUT = """
             if (texto.startsWith('<img') || texto.startsWith('📁 <a')) {
                 return texto;
             }
-            const urlRegex = new RegExp('(https?://[^\\s]+)', 'g');
+            // La URL continúa hasta el primer espacio. Esto conserva rutas e IDs,
+            // por ejemplo la URL completa de un vídeo de YouTube.
+            const urlRegex = /https?:\/\/[^\s]+/gi;
             return texto.replace(urlRegex, function(url) {
-                return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+                let urlLimpia = url;
+                let puntuacionFinal = '';
+
+                // La puntuación que venga después de la URL no debe formar parte del enlace.
+                while (/[.,!?;:)]$/.test(urlLimpia)) {
+                    puntuacionFinal = urlLimpia.slice(-1) + puntuacionFinal;
+                    urlLimpia = urlLimpia.slice(0, -1);
+                }
+
+                return `<a href="${urlLimpia}" target="_blank" rel="noopener noreferrer">${urlLimpia}</a>${puntuacionFinal}`;
             });
         }
 
