@@ -10,7 +10,6 @@ app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
 
-# Variable de entorno para la base de datos (se configura en Render o local)
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 def get_db():
@@ -33,9 +32,16 @@ def init_db():
             foto TEXT,
             fondoChat TEXT,
             tema TEXT DEFAULT 'dark',
-            brilloFondo INTEGER DEFAULT 100
+            brilloFondo INTEGER DEFAULT 100,
+            color_sent TEXT DEFAULT 'default',
+            color_recv TEXT DEFAULT 'default'
         )
     ''')
+
+    # Asegurar que existan las columnas nuevas si la tabla fue creada anteriormente
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_sent TEXT DEFAULT 'default'")
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_recv TEXT DEFAULT 'default'")
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS contactos (
             mi_id TEXT,
@@ -197,7 +203,7 @@ HTML_LAYOUT = """
 </head>
 <body>
 
-    <div class="modal-overlay" id="authModal">
+    <div class="modal-overlay" id="authModal" style="display:none;">
         <div class="modal-box">
             <h2 id="authTitle">Iniciar Sesión</h2>
             <input type="text" id="authName" placeholder="Tu nombre / usuario">
@@ -286,18 +292,68 @@ HTML_LAYOUT = """
             </select>
 
             <label class="file-label">Cambiar foto de perfil:</label>
-            <input type="file" id="editFoto" accept="image/*">
+            <div style="display:flex; gap:8px; align-items:center;">
+                <input type="file" id="editFoto" accept="image/*" style="flex:1;">
+                <button type="button" class="btn-action" style="width:auto; margin-top:0; padding:10px 14px; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditorImagen('foto')">Editar</button>
+            </div>
+            <div id="fotoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Foto editada lista para guardar</div>
 
             <label class="file-label">Cambiar fondo de chat:</label>
-            <input type="file" id="editFondoChat" accept="image/*">
+            <div style="display:flex; gap:8px; align-items:center;">
+                <input type="file" id="editFondoChat" accept="image/*" style="flex:1;">
+                <button type="button" class="btn-action" style="width:auto; margin-top:0; padding:10px 14px; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditorImagen('fondo')">Editar</button>
+            </div>
+            <div id="fondoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Fondo editado listo para guardar</div>
 
             <label class="file-label">Brillo / Intensidad del Fondo (<span id="brilloVal">100</span>%):</label>
             <div class="slider-container">
                 <input type="range" id="editBrillo" min="10" max="100" value="100" oninput="document.getElementById('brilloVal').innerText = this.value">
             </div>
 
+            <hr style="margin: 15px 0; border-color: var(--border-color);">
+            <h3 style="font-size: 0.95rem; color: var(--accent); margin-bottom: 8px; text-align: left;">Color de mensajes</h3>
+
+            <div style="text-align: left; margin-bottom: 10px;">
+                <label class="file-label" style="margin-top:0;">Mis mensajes (Enviados):</label>
+                <select id="editColorSentSelect" onchange="toggleColorInput('sent')">
+                    <option value="default">Predeterminado (según tema)</option>
+                    <option value="custom">Personalizado</option>
+                </select>
+                <input type="color" id="editColorSentInput" value="#005c4b" style="display:none; width:100%; height:38px; margin-top:5px; border:none; background:transparent; cursor:pointer;">
+            </div>
+
+            <div style="text-align: left; margin-bottom: 10px;">
+                <label class="file-label" style="margin-top:0;">Mensajes recibidos:</label>
+                <select id="editColorRecvSelect" onchange="toggleColorInput('recv')">
+                    <option value="default">Predeterminado (según tema)</option>
+                    <option value="custom">Personalizado</option>
+                </select>
+                <input type="color" id="editColorRecvInput" value="#202c33" style="display:none; width:100%; height:38px; margin-top:5px; border:none; background:transparent; cursor:pointer;">
+            </div>
+
             <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
+        </div>
+    </div>
+
+    <!-- Modal Editor de Imagen (Estilo Canva / WhatsApp) -->
+    <div class="modal-overlay" id="imageEditorModal" style="display:none;">
+        <div class="modal-box" style="max-width:440px;">
+            <span class="close-btn" onclick="cerrarEditorImagen()">&times;</span>
+            <h2 id="editorTitle">Editar Imagen</h2>
+            <div style="position:relative; width:300px; height:300px; margin:10px auto; background:#000; border-radius:8px; overflow:hidden; touch-action:none;" id="canvasContainer">
+                <canvas id="editorCanvas" width="300" height="300" style="width:100%; height:100%; cursor:grab;"></canvas>
+            </div>
+            
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:10px;">
+                <div style="flex:1; text-align:left;">
+                    <label style="font-size:0.8rem; color:var(--text-sub);">Zoom:</label>
+                    <input type="range" id="editorZoomSlider" min="0.2" max="3" step="0.05" value="1" style="width:100%; accent-color:var(--accent);" oninput="onZoomSliderChange(this.value)">
+                </div>
+                <button type="button" id="rotateHoldBtn" title="Mantén pulsado para rotar" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent); font-size:1.4rem; width:45px; height:45px; border-radius:50%; cursor:pointer; display:flex; justify-content:center; align-items:center; flex-shrink:0;">↻</button>
+            </div>
+
+            <button type="button" class="btn-action" onclick="confirmarEdicionImagen()">Aplicar Cambios</button>
         </div>
     </div>
 
@@ -359,11 +415,31 @@ HTML_LAYOUT = """
         let contactoActivo = null;
         let misContactos = [];
 
+        // Variables del Editor de Imagen
+        let editorTargetType = null; // 'foto' o 'fondo'
+        let editorImg = new Image();
+        let imgX = 150, imgY = 150;
+        let imgScale = 1.0;
+        let imgAngle = 0;
+        let isDragging = false;
+        let activeHandle = null;
+        let dragStartX = 0, dragStartY = 0;
+        let dragStartImgX = 0, dragStartImgY = 0;
+        let rotateInterval = null;
+        let editedFotoBase64 = null;
+        let editedFondoBase64 = null;
+        let cornerPoints = [];
+
         window.onload = () => {
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
             if (sesionGuardada) {
+                // Entrada directa inmediata sin pantalla de login
+                document.getElementById('authModal').style.display = 'none';
                 miUsuario = JSON.parse(sesionGuardada);
+                iniciarApp();
                 socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
+            } else {
+                document.getElementById('authModal').style.display = 'flex';
             }
         };
 
@@ -372,6 +448,19 @@ HTML_LAYOUT = """
                 document.body.classList.add('light-theme');
             } else {
                 document.body.classList.remove('light-theme');
+            }
+
+            // Aplicar colores personalizados de mensajes
+            if (miUsuario && miUsuario.color_sent && miUsuario.color_sent !== 'default') {
+                document.documentElement.style.setProperty('--msg-sent', miUsuario.color_sent);
+            } else {
+                document.documentElement.style.removeProperty('--msg-sent');
+            }
+
+            if (miUsuario && miUsuario.color_recv && miUsuario.color_recv !== 'default') {
+                document.documentElement.style.setProperty('--msg-recv', miUsuario.color_recv);
+            } else {
+                document.documentElement.style.removeProperty('--msg-recv');
             }
 
             const bgOverlay = document.getElementById('chatBgOverlay');
@@ -629,12 +718,45 @@ HTML_LAYOUT = """
             }
         });
 
+        function toggleColorInput(type) {
+            const select = document.getElementById(type === 'sent' ? 'editColorSentSelect' : 'editColorRecvSelect');
+            const input = document.getElementById(type === 'sent' ? 'editColorSentInput' : 'editColorRecvInput');
+            input.style.display = (select.value === 'custom') ? 'block' : 'none';
+        }
+
         function abrirAjustes() {
             document.getElementById('editName').value = miUsuario.nombre;
             document.getElementById('editTheme').value = miUsuario.tema || 'dark';
             const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : 100;
             document.getElementById('editBrillo').value = brillo;
             document.getElementById('brilloVal').innerText = brillo;
+
+            // Configurar selects de color de mensaje
+            const cSent = miUsuario.color_sent || 'default';
+            if (cSent !== 'default') {
+                document.getElementById('editColorSentSelect').value = 'custom';
+                document.getElementById('editColorSentInput').style.display = 'block';
+                document.getElementById('editColorSentInput').value = cSent;
+            } else {
+                document.getElementById('editColorSentSelect').value = 'default';
+                document.getElementById('editColorSentInput').style.display = 'none';
+            }
+
+            const cRecv = miUsuario.color_recv || 'default';
+            if (cRecv !== 'default') {
+                document.getElementById('editColorRecvSelect').value = 'custom';
+                document.getElementById('editColorRecvInput').style.display = 'block';
+                document.getElementById('editColorRecvInput').value = cRecv;
+            } else {
+                document.getElementById('editColorRecvSelect').value = 'default';
+                document.getElementById('editColorRecvInput').style.display = 'none';
+            }
+
+            editedFotoBase64 = null;
+            editedFondoBase64 = null;
+            document.getElementById('fotoEditedTag').style.display = 'none';
+            document.getElementById('fondoEditedTag').style.display = 'none';
+
             document.getElementById('settingsModal').style.display = 'flex';
         }
 
@@ -650,15 +772,32 @@ HTML_LAYOUT = """
             const nuevoTema = document.getElementById('editTheme').value;
             const nuevoBrillo = parseInt(document.getElementById('editBrillo').value);
             
+            // Colores de mensaje
+            let colorSent = 'default';
+            if (document.getElementById('editColorSentSelect').value === 'custom') {
+                colorSent = document.getElementById('editColorSentInput').value;
+            }
+
+            let colorRecv = 'default';
+            if (document.getElementById('editColorRecvSelect').value === 'custom') {
+                colorRecv = document.getElementById('editColorRecvInput').value;
+            }
+
+            // Foto de perfil
             const fileFoto = document.getElementById('editFoto');
             let nuevaFoto = miUsuario.foto;
-            if (fileFoto.files.length > 0) {
+            if (editedFotoBase64) {
+                nuevaFoto = editedFotoBase64;
+            } else if (fileFoto.files.length > 0) {
                 nuevaFoto = await convertAndCompressBase64(fileFoto.files[0]);
             }
 
+            // Fondo de chat
             const fileFondo = document.getElementById('editFondoChat');
             let nuevoFondo = miUsuario.fondoChat;
-            if (fileFondo.files.length > 0) {
+            if (editedFondoBase64) {
+                nuevoFondo = editedFondoBase64;
+            } else if (fileFondo.files.length > 0) {
                 nuevoFondo = await convertAndCompressBase64(fileFondo.files[0]);
             }
 
@@ -669,7 +808,9 @@ HTML_LAYOUT = """
                 foto: nuevaFoto,
                 fondoChat: nuevoFondo,
                 tema: nuevoTema,
-                brilloFondo: nuevoBrillo
+                brilloFondo: nuevoBrillo,
+                color_sent: colorSent,
+                color_recv: colorRecv
             });
         }
 
@@ -688,6 +829,266 @@ HTML_LAYOUT = """
                 alert(res.mensaje);
             }
         });
+
+        /* --- LÓGICA DEL EDITOR DE IMAGEN --- */
+        function abrirEditorImagen(tipo) {
+            editorTargetType = tipo;
+            const inputId = tipo === 'foto' ? 'editFoto' : 'editFondoChat';
+            const fileInput = document.getElementById(inputId);
+
+            document.getElementById('editorTitle').innerText = tipo === 'foto' ? 'Editar Foto de Perfil' : 'Editar Fondo de Chat';
+
+            if (fileInput.files.length > 0) {
+                const reader = new FileReader();
+                reader.onload = (e) => cargarImagenEnEditor(e.target.result);
+                reader.readAsDataURL(fileInput.files[0]);
+            } else {
+                const srcActual = tipo === 'foto' ? miUsuario.foto : miUsuario.fondoChat;
+                if (srcActual) {
+                    cargarImagenEnEditor(srcActual);
+                } else {
+                    alert("Selecciona un archivo primero o añade una imagen.");
+                }
+            }
+        }
+
+        function cargarImagenEnEditor(src) {
+            editorImg = new Image();
+            editorImg.crossOrigin = "anonymous";
+            editorImg.onload = () => {
+                imgX = 150;
+                imgY = 150;
+                imgScale = 1.0;
+                imgAngle = 0;
+                document.getElementById('editorZoomSlider').value = 1.0;
+                document.getElementById('imageEditorModal').style.display = 'flex';
+                initCanvasEvents();
+                renderEditorCanvas();
+            };
+            editorImg.src = src;
+        }
+
+        function cerrarEditorImagen() {
+            document.getElementById('imageEditorModal').style.display = 'none';
+            if (rotateInterval) clearInterval(rotateInterval);
+        }
+
+        function onZoomSliderChange(val) {
+            imgScale = parseFloat(val);
+            renderEditorCanvas();
+        }
+
+        function initCanvasEvents() {
+            const canvas = document.getElementById('editorCanvas');
+            
+            canvas.onmousedown = (e) => handleStart(e.clientX, e.clientY);
+            canvas.onmousemove = (e) => handleMove(e.clientX, e.clientY);
+            canvas.onmouseup = canvas.onmouseleave = () => handleEnd();
+
+            canvas.ontouchstart = (e) => {
+                if (e.touches.length === 1) {
+                    handleStart(e.touches[0].clientX, e.touches[0].clientY);
+                }
+            };
+            canvas.ontouchmove = (e) => {
+                if (e.touches.length === 1) {
+                    handleMove(e.touches[0].clientX, e.touches[0].clientY);
+                }
+            };
+            canvas.ontouchend = () => handleEnd();
+
+            // Configurar botón de rotación continua
+            const rotateBtn = document.getElementById('rotateHoldBtn');
+            
+            const startRotate = () => {
+                if (rotateInterval) clearInterval(rotateInterval);
+                rotateInterval = setInterval(() => {
+                    imgAngle = (imgAngle + 3) % 360;
+                    renderEditorCanvas();
+                }, 30);
+            };
+
+            const stopRotate = () => {
+                if (rotateInterval) {
+                    clearInterval(rotateInterval);
+                    rotateInterval = null;
+                }
+            };
+
+            rotateBtn.onmousedown = startRotate;
+            rotateBtn.onmouseup = rotateBtn.onmouseleave = stopRotate;
+            rotateBtn.ontouchstart = (e) => { e.preventDefault(); startRotate(); };
+            rotateBtn.ontouchend = stopRotate;
+        }
+
+        function getCanvasPoint(clientX, clientY) {
+            const canvas = document.getElementById('editorCanvas');
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: (clientX - rect.left) * (300 / rect.width),
+                y: (clientY - rect.top) * (300 / rect.height)
+            };
+        }
+
+        function handleStart(clientX, clientY) {
+            const pt = getCanvasPoint(clientX, clientY);
+            
+            // Comprobar si se hace clic en alguna esquina de las 4 para escalar
+            activeHandle = null;
+            for (let i = 0; i < cornerPoints.length; i++) {
+                const dist = Math.hypot(pt.x - cornerPoints[i].x, pt.y - cornerPoints[i].y);
+                if (dist < 20) {
+                    activeHandle = i;
+                    break;
+                }
+            }
+
+            if (activeHandle !== null) {
+                dragStartX = clientX;
+                dragStartY = clientY;
+            } else {
+                isDragging = true;
+                dragStartX = clientX;
+                dragStartY = clientY;
+                dragStartImgX = imgX;
+                dragStartImgY = imgY;
+            }
+        }
+
+        function handleMove(clientX, clientY) {
+            if (activeHandle !== null) {
+                const pt = getCanvasPoint(clientX, clientY);
+                const distCenter = Math.hypot(pt.x - imgX, pt.y - imgY);
+                const baseRadius = Math.hypot(editorImg.width / 2, editorImg.height / 2);
+                if (baseRadius > 0) {
+                    imgScale = Math.max(0.1, Math.min(4.0, distCenter / baseRadius));
+                    document.getElementById('editorZoomSlider').value = imgScale;
+                    renderEditorCanvas();
+                }
+            } else if (isDragging) {
+                const pt = getCanvasPoint(clientX, clientY);
+                const ptStart = getCanvasPoint(dragStartX, dragStartY);
+                imgX = dragStartImgX + (pt.x - ptStart.x);
+                imgY = dragStartImgY + (pt.y - ptStart.y);
+                renderEditorCanvas();
+            }
+        }
+
+        function handleEnd() {
+            isDragging = false;
+            activeHandle = null;
+        }
+
+        function renderEditorCanvas() {
+            const canvas = document.getElementById('editorCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, 300, 300);
+
+            // Dibujar imagen con transformación
+            ctx.save();
+            ctx.translate(imgX, imgY);
+            ctx.rotate((imgAngle * Math.PI) / 180);
+            ctx.scale(imgScale, imgScale);
+            ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+            ctx.restore();
+
+            // Dibujar capa oscura con agujero (máscara)
+            ctx.save();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            ctx.fillRect(0, 0, 300, 300);
+
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.beginPath();
+            if (editorTargetType === 'foto') {
+                ctx.arc(150, 150, 110, 0, Math.PI * 2);
+            } else {
+                ctx.rect(20, 20, 260, 260);
+            }
+            ctx.fill();
+            ctx.restore();
+
+            // Dibujar borde guía y los 4 puntos/asideros en las esquinas de la imagen
+            ctx.save();
+            ctx.strokeStyle = '#00a884';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            if (editorTargetType === 'foto') {
+                ctx.arc(150, 150, 110, 0, Math.PI * 2);
+            } else {
+                ctx.rect(20, 20, 260, 260);
+            }
+            ctx.stroke();
+
+            // Calcular las 4 esquinas transformadas
+            const w = (editorImg.width * imgScale) / 2;
+            const h = (editorImg.height * imgScale) / 2;
+            const rad = (imgAngle * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+
+            cornerPoints = [
+                { x: imgX + (-w * cos - -h * sin), y: imgY + (-w * sin + -h * cos) },
+                { x: imgX + (w * cos - -h * sin), y: imgY + (w * sin + -h * cos) },
+                { x: imgX + (w * cos - h * sin), y: imgY + (w * sin + h * cos) },
+                { x: imgX + (-w * cos - h * sin), y: imgY + (-w * sin + h * cos) }
+            ];
+
+            // Dibujar asideros en las 4 esquinas
+            cornerPoints.forEach(pt => {
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+                ctx.fillStyle = '#00a884';
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+            ctx.restore();
+        }
+
+        function confirmarEdicionImagen() {
+            const offCanvas = document.createElement('canvas');
+            const size = editorTargetType === 'foto' ? 220 : 500;
+            offCanvas.width = size;
+            offCanvas.height = size;
+            const ctx = offCanvas.getContext('2d');
+
+            if (editorTargetType === 'foto') {
+                ctx.beginPath();
+                ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+                ctx.clip();
+                
+                const factor = size / 220; // relación del marco de 220px
+                const offsetX = (imgX - 40) * factor;
+                const offsetY = (imgY - 40) * factor;
+
+                ctx.translate(offsetX, offsetY);
+                ctx.rotate((imgAngle * Math.PI) / 180);
+                ctx.scale(imgScale * factor, imgScale * factor);
+                ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+            } else {
+                const factor = size / 260;
+                const offsetX = (imgX - 20) * factor;
+                const offsetY = (imgY - 20) * factor;
+
+                ctx.translate(offsetX, offsetY);
+                ctx.rotate((imgAngle * Math.PI) / 180);
+                ctx.scale(imgScale * factor, imgScale * factor);
+                ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+            }
+
+            const editedData = offCanvas.toDataURL('image/jpeg', 0.85);
+
+            if (editorTargetType === 'foto') {
+                editedFotoBase64 = editedData;
+                document.getElementById('fotoEditedTag').style.display = 'block';
+            } else {
+                editedFondoBase64 = editedData;
+                document.getElementById('fondoEditedTag').style.display = 'block';
+            }
+
+            cerrarEditorImagen();
+        }
 
         function cerrarSesion() {
             localStorage.removeItem('arxechat_sesion');
@@ -980,8 +1381,8 @@ def registrar(data):
     else:
         nuevo_id = str(random.randint(10000000, 99999999))
         cursor.execute(
-            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
+            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100, 'default', 'default')
         )
     conn.commit()
     
@@ -1026,12 +1427,14 @@ def actualizar_perfil(data):
     nuevo_fondo = data.get('fondoChat')
     nuevo_tema = data.get('tema', 'dark')
     nuevo_brillo = data.get('brilloFondo', 100)
+    nuevo_color_sent = data.get('color_sent', 'default')
+    nuevo_color_recv = data.get('color_recv', 'default')
 
     cursor.execute("""
         UPDATE usuarios 
-        SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s 
+        SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s, color_sent = %s, color_recv = %s 
         WHERE id = %s
-    """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
+    """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, nuevo_color_sent, nuevo_color_recv, data['id']))
     conn.commit()
 
     cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
