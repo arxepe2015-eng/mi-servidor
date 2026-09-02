@@ -160,7 +160,7 @@ HTML_LAYOUT = """
         .member-info { display: flex; align-items: center; gap: 10px; }
         .member-btn { background: var(--accent); border: none; color: white; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
 
-        .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
+        .app-container { width: 100%; height: 100vh; display: none; background: var(--bg-card); }
         
         .sidebar { width: 350px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
         .sidebar-header { background: var(--bg-header); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
@@ -941,7 +941,7 @@ HTML_LAYOUT = """
             }
         });
 
-        /* --- LÓGICA DEL EDITOR DE IMAGEN CORREGIDA --- */
+        /* --- LÓGICA DEL EDITOR DE IMAGEN --- */
         function abrirEditorImagen(tipo) {
             editorTargetType = tipo;
             const inputId = tipo === 'foto' ? 'editFoto' : 'editFondoChat';
@@ -959,7 +959,6 @@ HTML_LAYOUT = """
                 }
                 reader.readAsDataURL(fileInput.files[0]);
             } else {
-                // Ahora carga la original si existe para no perder calidad ni partes de la imagen al editarla por segunda vez
                 const srcActualOrig = tipo === 'foto' ? (miUsuario.foto_orig || miUsuario.foto) : (miUsuario.fondo_orig || miUsuario.fondoChat);
                 if (srcActualOrig) {
                     cargarImagenEnEditor(srcActualOrig);
@@ -1132,7 +1131,6 @@ HTML_LAYOUT = """
                 const centerOffX = outW / 2;
                 const centerOffY = outH / 2;
                 
-                // Mapeo correcto de las coordenadas del canvas al lienzo de salida
                 const mapX = (imgX - 150) * factor;
                 const mapY = (imgY - 150) * factor;
 
@@ -1163,7 +1161,6 @@ HTML_LAYOUT = """
             const listaDiv = document.getElementById('contactsList');
             listaDiv.innerHTML = '';
             
-            // Ordena automáticamente por mensajes sin leer de mayor a menor
             misContactos.sort((a, b) => (b.sinLeer || 0) - (a.sinLeer || 0) || a.nombre.localeCompare(b.nombre));
 
             misContactos.forEach(c => {
@@ -1177,7 +1174,6 @@ HTML_LAYOUT = """
                 if (c.esGrupo) etiqueta = c.esGuardado ? '<span style="font-size:0.75rem; color:var(--accent);">(Grupo)</span>' : '<span style="font-size:0.75rem; color:#ea4335;">[Aceptar Grupo]</span>';
                 else etiqueta = c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>';
 
-                // Mostrar círculo de sin leer como querías
                 const badgeHtml = (c.sinLeer && c.sinLeer > 0) ? `<span class="unread-badge">${c.sinLeer}</span>` : '';
 
                 btn.innerHTML = `
@@ -1257,7 +1253,7 @@ HTML_LAYOUT = """
 
         function formatearTextoConLinks(texto) {
             if (texto.startsWith('<img') || texto.startsWith('📁 <a')) return texto;
-            r"const urlRegex = /(https?:\/\/[^\s]+)/g;"
+            const urlRegex = /(https?:\/\/[^\s]+)/g;
             return texto.replace(urlRegex, function(url) {
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
             });
@@ -1480,7 +1476,6 @@ def obtener_contactos(data):
     """, (mi_id,))
     grupos_db = cursor.fetchall()
     
-    # Lógica de mensajes sin leer (directos)
     cursor.execute("""
         SELECT emisor, COUNT(*) as sin_leer
         FROM mensajes
@@ -1489,7 +1484,6 @@ def obtener_contactos(data):
     """, (mi_id,))
     unread_direct = {row['emisor']: row['sin_leer'] for row in cursor.fetchall()}
     
-    # Lógica de mensajes sin leer (grupos)
     cursor.execute("""
         SELECT receptor as grupo_id, COUNT(*) as sin_leer
         FROM mensajes
@@ -1516,7 +1510,6 @@ def obtener_contactos(data):
         g_dict['sinLeer'] = unread_groups.get(g_dict['id'], 0)
         lista.append(g_dict)
         
-    # Personas que han enviado mensaje pero no están en contactos
     cursor.execute("""
         SELECT DISTINCT emisor as id, nombreEmisor as nombre, fotoEmisor as foto
         FROM mensajes
@@ -1567,7 +1560,6 @@ def cargar_historial(data):
     cursor.execute(query, tuple(params))
     mensajes = cursor.fetchall()
     
-    # Marcamos leídos al cargar historial
     if es_grupo:
         cursor.execute("UPDATE mensajes SET leido = 1 WHERE receptor = %s AND es_grupo = 1 AND emisor != %s", (receptor, emisor))
     else:
@@ -1698,60 +1690,3 @@ def crear_grupo(data):
     conn.close()
     join_room(grupo_id)
     emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
-
-@socketio.on('obtener_detalles_grupo')
-def obtener_detalles_grupo(data):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (data['grupo_id'],))
-    g = cursor.fetchone()
-    if not g: return
-    cursor.execute("SELECT u.id, u.nombre FROM miembros_grupo mg JOIN usuarios u ON mg.usuario_id = u.id WHERE mg.grupo_id = %s", (data['grupo_id'],))
-    miembros = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    emit('detalles_grupo_cargados', {'creador_id': g['creador_id'], 'miembros': [dict(m) for m in miembros]})
-
-@socketio.on('actualizar_grupo')
-def actualizar_grupo(data):
-    conn = get_db()
-    cursor = conn.cursor()
-    if data.get('foto'):
-        cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s AND creador_id = %s", (data['nombre'], data['foto'], data['grupo_id'], data['usuario_id']))
-    else:
-        cursor.execute("UPDATE grupos SET nombre = %s WHERE id = %s AND creador_id = %s", (data['nombre'], data['grupo_id'], data['usuario_id']))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    emit('grupo_actualizado', {'exito': True}, to=data['grupo_id'])
-
-@socketio.on('agregar_miembro_grupo')
-def agregar_miembro_grupo(data):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM usuarios WHERE id = %s OR nombre = %s", (data['id_o_nombre'], data['id_o_nombre']))
-    u = cursor.fetchone()
-    if not u:
-        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'Usuario no encontrado'})
-        return
-    cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, 0) ON CONFLICT DO NOTHING", (data['grupo_id'], u['id']))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    emit('miembro_agregado_resultado', {'exito': True, 'mensaje': 'Usuario añadido al grupo'})
-    emit('grupo_actualizado_para_ti', {}, to=u['id'])
-
-@socketio.on('eliminar_grupo')
-def eliminar_grupo(data):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM grupos WHERE id = %s AND creador_id = %s", (data['grupo_id'], data['usuario_id']))
-    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s", (data['grupo_id'],))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    emit('grupo_eliminado', {'grupo_id': data['grupo_id']}, to=data['grupo_id'])
-
-if __name__ == '__main__':
-    # No es necesario forzar hilos. Gunicorn/Render lo gestionará de la mejor manera.
-    socketio.run(app, debug=False, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
