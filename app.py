@@ -1257,7 +1257,7 @@ HTML_LAYOUT = """
 
         function formatearTextoConLinks(texto) {
             if (texto.startsWith('<img') || texto.startsWith('📁 <a')) return texto;
-            const urlRegex = /(https?:\/\/[^\s]+)/g;
+            r"const urlRegex = /(https?:\/\/[^\s]+)/g;"
             return texto.replace(urlRegex, function(url) {
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
             });
@@ -1754,4 +1754,4 @@ def eliminar_grupo(data):
 
 if __name__ == '__main__':
     # No es necesario forzar hilos. Gunicorn/Render lo gestionará de la mejor manera.
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, debug=False, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
