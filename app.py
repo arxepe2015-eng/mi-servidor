@@ -224,8 +224,11 @@ HTML_LAYOUT = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Arxechat</title>
-    <meta name="description" content="Arxechat: mensajería web rápida con chats privados, grupos y notificaciones.">
+    <meta name="description" content="Es una plataforma de mensajes creada por Arxe. Chatea de forma rápida y sencilla con conversaciones privadas y grupos.">
     <meta name="theme-color" content="#087ff5">
+    <meta name="robots" content="index, follow">
+    <meta name="author" content="Arxe">
+    <meta property="og:site_name" content="Arxechat">
     <link rel="canonical" href="{{ request.url_root }}">
     <link rel="icon" type="image/png" sizes="256x256" href="/favicon.png">
     <link rel="shortcut icon" type="image/png" href="/favicon.png">
@@ -238,10 +241,13 @@ HTML_LAYOUT = """
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
-      "@type": "WebSite",
+      "@type": "WebApplication",
       "name": "Arxechat",
+      "applicationCategory": "CommunicationApplication",
+      "description": "Es una plataforma de mensajes creada por Arxe. Chatea de forma rápida y sencilla con conversaciones privadas y grupos.",
       "url": "{{ request.url_root }}",
-      "image": "{{ request.url_root }}favicon.png"
+      "image": "{{ request.url_root }}favicon.png",
+      "logo": "{{ request.url_root }}favicon.png"
     }
     </script>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
