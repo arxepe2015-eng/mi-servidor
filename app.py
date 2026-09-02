@@ -362,7 +362,7 @@ HTML_LAYOUT = """
 </head>
 <body>
 
-    <div class="modal-overlay" id="authModal" style="display:none;">
+    <div class="modal-overlay" id="authModal" style="display:flex;">
         <div class="modal-box">
             <img src="/favicon.png" alt="Arxechat" style="width:78px;height:78px;border-radius:20%;object-fit:cover;margin:0 auto 12px;display:block;">
             <h2 id="authTitle">Iniciar Sesión</h2>
@@ -755,18 +755,33 @@ HTML_LAYOUT = """
             setTimeout(() => window.location.reload(), 180);
         }
 
-        window.onload = () => {
-            const sesionGuardada = localStorage.getItem('arxechat_sesion');
-            if (sesionGuardada) {
-                // Entrada directa inmediata sin pantalla de login
-                document.getElementById('authModal').style.display = 'none';
-                miUsuario = JSON.parse(sesionGuardada);
-                iniciarApp();
-                socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
-            } else {
-                document.getElementById('authModal').style.display = 'flex';
+        window.addEventListener('load', () => {
+            const authModal = document.getElementById('authModal');
+            const appContainer = document.getElementById('appContainer');
+            try {
+                const sesionGuardada = localStorage.getItem('arxechat_sesion');
+                if (sesionGuardada) {
+                    const sesion = JSON.parse(sesionGuardada);
+                    if (!sesion || !sesion.id || !sesion.nombre || !sesion.pass) {
+                        throw new Error('Sesión guardada incompleta');
+                    }
+                    miUsuario = sesion;
+                    authModal.style.display = 'none';
+                    appContainer.style.display = 'flex';
+                    iniciarApp();
+                    socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
+                } else {
+                    appContainer.style.display = 'none';
+                    authModal.style.display = 'flex';
+                }
+            } catch (error) {
+                console.warn('Sesión local inválida; se muestra el inicio de sesión.', error);
+                localStorage.removeItem('arxechat_sesion');
+                miUsuario = null;
+                appContainer.style.display = 'none';
+                authModal.style.display = 'flex';
             }
-        };
+        });
 
         function aplicarTema() {
             if (miUsuario && miUsuario.tema === 'light') {
