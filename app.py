@@ -3,12 +3,13 @@ import random
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template_string
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
+# Se elimina async_mode='threading' para evitar el retraso de 5 segundos en Render
+socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=10 * 1024 * 1024)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
@@ -38,9 +39,11 @@ def init_db():
         )
     ''')
 
-    # Asegurar que existan las columnas nuevas si la tabla fue creada anteriormente
+    # Añadir columnas para conservar la imagen original sin recortar
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_sent TEXT DEFAULT 'default'")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_recv TEXT DEFAULT 'default'")
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS foto_orig TEXT")
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS fondo_orig TEXT")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS contactos (
@@ -301,7 +304,6 @@ HTML_LAYOUT = """
     </div>
 
     <div class="modal-overlay" id="settingsModal" style="display:none;">
-
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
             <h2>Ajustes de Perfil</h2>
@@ -364,7 +366,7 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <!-- Modal Editor de Imagen (Estilo Canva / WhatsApp) -->
+    <!-- Modal Editor de Imagen -->
     <div class="modal-overlay" id="imageEditorModal" style="display:none;">
         <div class="modal-box" style="max-width:440px;">
             <span class="close-btn" onclick="cerrarEditorImagen()">&times;</span>
@@ -447,7 +449,7 @@ HTML_LAYOUT = """
         let misContactos = [];
 
         // Variables del Editor de Imagen
-        let editorTargetType = null; // 'foto' o 'fondo'
+        let editorTargetType = null; 
         let editorImg = new Image();
         let imgX = 150, imgY = 150;
         let imgScale = 1.0;
@@ -457,16 +459,15 @@ HTML_LAYOUT = """
         let dragStartX = 0, dragStartY = 0;
         let dragStartImgX = 0, dragStartImgY = 0;
         let rotateInterval = null;
+        
         let editedFotoBase64 = null;
+        let editedFotoOrigBase64 = null; // Mantiene la versión sin recortes
         let editedFondoBase64 = null;
+        let editedFondoOrigBase64 = null; // Mantiene el fondo sin recortes
+        
         let cornerPoints = [];
-        // Recuadro de recorte del fondo de chat: rectangular (no cuadrado), porque el fondo
-        // cubre pantallas rectangulares, no un icono cuadrado como la foto de perfil.
         const FONDO_RECT = { x: 15, y: 70, w: 270, h: 160 };
 
-        // En tablets que rotan de orientación, el ancho puede cruzar el punto de corte (768px)
-        // mientras hay un chat abierto. Sin este listener, la clase 'active-mobile' se queda
-        // desactualizada y la barra de envío deja de mostrarse hasta reabrir el chat.
         function ajustarLayoutSegunAncho() {
             if (!contactoActivo) return;
             const chatArea = document.getElementById('chatArea');
@@ -482,7 +483,6 @@ HTML_LAYOUT = """
         window.onload = () => {
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
             if (sesionGuardada) {
-                // Entrada directa inmediata sin pantalla de login
                 document.getElementById('authModal').style.display = 'none';
                 miUsuario = JSON.parse(sesionGuardada);
                 iniciarApp();
@@ -499,17 +499,17 @@ HTML_LAYOUT = """
                 document.body.classList.remove('light-theme');
             }
 
-            // Aplicar colores personalizados de mensajes
+            // Aplicación robusta de colores personalizados al document.body
             if (miUsuario && miUsuario.color_sent && miUsuario.color_sent !== 'default') {
-                document.documentElement.style.setProperty('--msg-sent', miUsuario.color_sent);
+                document.body.style.setProperty('--msg-sent', miUsuario.color_sent);
             } else {
-                document.documentElement.style.removeProperty('--msg-sent');
+                document.body.style.removeProperty('--msg-sent');
             }
 
             if (miUsuario && miUsuario.color_recv && miUsuario.color_recv !== 'default') {
-                document.documentElement.style.setProperty('--msg-recv', miUsuario.color_recv);
+                document.body.style.setProperty('--msg-recv', miUsuario.color_recv);
             } else {
-                document.documentElement.style.removeProperty('--msg-recv');
+                document.body.style.removeProperty('--msg-recv');
             }
 
             const bgOverlay = document.getElementById('chatBgOverlay');
@@ -585,7 +585,7 @@ HTML_LAYOUT = """
                     fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
                 }
 
-                socket.emit('registrar_usuario', { nombre, pass, foto: fotoBase64 });
+                socket.emit('registrar_usuario', { nombre, pass, foto: fotoBase64, foto_orig: fotoBase64 });
             } else {
                 socket.emit('login_usuario', { nombre, pass });
             }
@@ -713,13 +713,11 @@ HTML_LAYOUT = """
             }
         }
 
-        function cerrarOpcionesContacto() {
-            document.getElementById('contactOptionsModal').style.display = 'none';
-        }
+        function cerrarOpcionesContacto() { document.getElementById('contactOptionsModal').style.display = 'none'; }
 
         function confirmarEliminarContacto() {
             cerrarOpcionesContacto();
-            if(contactoActivo && confirm("¿Eliminar este contacto? Si te vuelve a escribir podrás seguir recibiendo sus mensajes, pero dejará de estar en tu lista de contactos.")) {
+            if(contactoActivo && confirm("¿Eliminar este contacto? Si te vuelve a escribir podrás seguir recibiendo sus mensajes.")) {
                 socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
@@ -733,19 +731,15 @@ HTML_LAYOUT = """
 
         function confirmarVaciarConversacion() {
             cerrarOpcionesContacto();
-            if(contactoActivo && confirm("¿Vaciar esta conversación? Se borrará solo de tu lado; si la otra persona también la vacía, se elimina para siempre.")) {
+            if(contactoActivo && confirm("¿Vaciar esta conversación?")) {
                 socket.emit('vaciar_conversacion', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 document.getElementById('messages').innerHTML = '';
             }
         }
 
-        socket.on('conversacion_vaciada', () => {
-            socket.emit('obtener_contactos', { id: miUsuario.id });
-        });
+        socket.on('conversacion_vaciada', () => { socket.emit('obtener_contactos', { id: miUsuario.id }); });
 
-        function cerrarAjustesGrupo() {
-            document.getElementById('groupSettingsModal').style.display = 'none';
-        }
+        function cerrarAjustesGrupo() { document.getElementById('groupSettingsModal').style.display = 'none'; }
 
         socket.on('detalles_grupo_cargados', (data) => {
             const esCreador = data.creador_id === miUsuario.id;
@@ -781,17 +775,9 @@ HTML_LAYOUT = """
             const nuevoNombre = document.getElementById('editGroupName').value.trim();
             const fileInput = document.getElementById('editGroupFoto');
             let nuevaFoto = null;
+            if(fileInput.files.length > 0) nuevaFoto = await convertAndCompressBase64(fileInput.files[0]);
 
-            if(fileInput.files.length > 0) {
-                nuevaFoto = await convertAndCompressBase64(fileInput.files[0]);
-            }
-
-            socket.emit('actualizar_grupo', {
-                grupo_id: contactoActivo.id,
-                usuario_id: miUsuario.id,
-                nombre: nuevoNombre,
-                foto: nuevaFoto
-            });
+            socket.emit('actualizar_grupo', { grupo_id: contactoActivo.id, usuario_id: miUsuario.id, nombre: nuevoNombre, foto: nuevaFoto });
         }
 
         socket.on('grupo_actualizado', (res) => {
@@ -807,24 +793,15 @@ HTML_LAYOUT = """
         function confirmarAgregarMiembroGrupo() {
             const idONombre = document.getElementById('addMemberInput').value.trim();
             if(!idONombre || !contactoActivo) return;
-            socket.emit('agregar_miembro_grupo', {
-                grupo_id: contactoActivo.id,
-                usuario_id: miUsuario.id,
-                id_o_nombre: idONombre
-            });
+            socket.emit('agregar_miembro_grupo', { grupo_id: contactoActivo.id, usuario_id: miUsuario.id, id_o_nombre: idONombre });
         }
 
         socket.on('miembro_agregado_resultado', (res) => {
             alert(res.mensaje || (res.exito ? "Miembro añadido." : "No se ha podido añadir."));
-            if(res.exito) {
-                document.getElementById('addMemberInput').value = '';
-            }
+            if(res.exito) document.getElementById('addMemberInput').value = '';
         });
 
-        // El grupo ha cambiado (p.ej. me han añadido a uno nuevo): refresco mi lista.
-        socket.on('grupo_actualizado_para_ti', () => {
-            socket.emit('obtener_contactos', { id: miUsuario.id });
-        });
+        socket.on('grupo_actualizado_para_ti', () => { socket.emit('obtener_contactos', { id: miUsuario.id }); });
 
         function eliminarGrupoCompleto() {
             if(!contactoActivo) return;
@@ -833,20 +810,15 @@ HTML_LAYOUT = """
             }
         }
 
-        socket.on('grupo_eliminado_resultado', (res) => {
-            if(!res.exito) alert(res.mensaje || "No se ha podido eliminar el grupo.");
-        });
+        socket.on('grupo_eliminado_resultado', (res) => { if(!res.exito) alert(res.mensaje || "No se ha podido eliminar el grupo."); });
 
-        // Broadcast a todos los miembros cuando el creador borra el grupo.
         socket.on('grupo_eliminado', (data) => {
             if(contactoActivo && contactoActivo.esGrupo && contactoActivo.id === data.grupo_id) {
                 cerrarAjustesGrupo();
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
                 document.getElementById('emptyState').style.display = 'flex';
-                if(window.innerWidth <= 768) {
-                    document.getElementById('chatArea').classList.remove('active-mobile');
-                }
+                if(window.innerWidth <= 768) document.getElementById('chatArea').classList.remove('active-mobile');
                 contactoActivo = null;
             }
             socket.emit('obtener_contactos', { id: miUsuario.id });
@@ -865,7 +837,6 @@ HTML_LAYOUT = """
             document.getElementById('editBrillo').value = brillo;
             document.getElementById('brilloVal').innerText = brillo;
 
-            // Configurar selects de color de mensaje
             const cSent = miUsuario.color_sent || 'default';
             if (cSent !== 'default') {
                 document.getElementById('editColorSentSelect').value = 'custom';
@@ -887,10 +858,11 @@ HTML_LAYOUT = """
             }
 
             editedFotoBase64 = null;
+            editedFotoOrigBase64 = null;
             editedFondoBase64 = null;
+            editedFondoOrigBase64 = null;
             document.getElementById('fotoEditedTag').style.display = 'none';
             document.getElementById('fondoEditedTag').style.display = 'none';
-
             document.getElementById('settingsModal').style.display = 'flex';
         }
 
@@ -906,33 +878,36 @@ HTML_LAYOUT = """
             const nuevoTema = document.getElementById('editTheme').value;
             const nuevoBrillo = parseInt(document.getElementById('editBrillo').value);
             
-            // Colores de mensaje
             let colorSent = 'default';
-            if (document.getElementById('editColorSentSelect').value === 'custom') {
-                colorSent = document.getElementById('editColorSentInput').value;
-            }
+            if (document.getElementById('editColorSentSelect').value === 'custom') colorSent = document.getElementById('editColorSentInput').value;
 
             let colorRecv = 'default';
-            if (document.getElementById('editColorRecvSelect').value === 'custom') {
-                colorRecv = document.getElementById('editColorRecvInput').value;
-            }
+            if (document.getElementById('editColorRecvSelect').value === 'custom') colorRecv = document.getElementById('editColorRecvInput').value;
 
-            // Foto de perfil
+            // FOTO
             const fileFoto = document.getElementById('editFoto');
             let nuevaFoto = miUsuario.foto;
+            let nuevaFotoOrig = miUsuario.foto_orig;
+            
             if (editedFotoBase64) {
                 nuevaFoto = editedFotoBase64;
+                nuevaFotoOrig = editedFotoOrigBase64 || miUsuario.foto_orig || nuevaFoto;
             } else if (fileFoto.files.length > 0) {
-                nuevaFoto = await convertAndCompressBase64(fileFoto.files[0]);
+                nuevaFotoOrig = await convertAndCompressBase64(fileFoto.files[0]);
+                nuevaFoto = nuevaFotoOrig;
             }
 
-            // Fondo de chat
+            // FONDO
             const fileFondo = document.getElementById('editFondoChat');
             let nuevoFondo = miUsuario.fondoChat;
+            let nuevoFondoOrig = miUsuario.fondo_orig;
+            
             if (editedFondoBase64) {
                 nuevoFondo = editedFondoBase64;
+                nuevoFondoOrig = editedFondoOrigBase64 || miUsuario.fondo_orig || nuevoFondo;
             } else if (fileFondo.files.length > 0) {
-                nuevoFondo = await convertAndCompressBase64(fileFondo.files[0]);
+                nuevoFondoOrig = await convertAndCompressBase64(fileFondo.files[0]);
+                nuevoFondo = nuevoFondoOrig;
             }
 
             socket.emit('actualizar_perfil', { 
@@ -940,7 +915,9 @@ HTML_LAYOUT = """
                 nombre: nuevoNombre, 
                 pass: nuevaPass, 
                 foto: nuevaFoto,
+                foto_orig: nuevaFotoOrig,
                 fondoChat: nuevoFondo,
+                fondo_orig: nuevoFondoOrig,
                 tema: nuevoTema,
                 brilloFondo: nuevoBrillo,
                 color_sent: colorSent,
@@ -964,7 +941,7 @@ HTML_LAYOUT = """
             }
         });
 
-        /* --- LÓGICA DEL EDITOR DE IMAGEN --- */
+        /* --- LÓGICA DEL EDITOR DE IMAGEN CORREGIDA --- */
         function abrirEditorImagen(tipo) {
             editorTargetType = tipo;
             const inputId = tipo === 'foto' ? 'editFoto' : 'editFondoChat';
@@ -974,12 +951,18 @@ HTML_LAYOUT = """
 
             if (fileInput.files.length > 0) {
                 const reader = new FileReader();
-                reader.onload = (e) => cargarImagenEnEditor(e.target.result);
+                reader.onload = async (e) => {
+                    const base64 = await convertAndCompressBase64(fileInput.files[0]);
+                    if (tipo === 'foto') editedFotoOrigBase64 = base64;
+                    else editedFondoOrigBase64 = base64;
+                    cargarImagenEnEditor(base64);
+                }
                 reader.readAsDataURL(fileInput.files[0]);
             } else {
-                const srcActual = tipo === 'foto' ? miUsuario.foto : miUsuario.fondoChat;
-                if (srcActual) {
-                    cargarImagenEnEditor(srcActual);
+                // Ahora carga la original si existe para no perder calidad ni partes de la imagen al editarla por segunda vez
+                const srcActualOrig = tipo === 'foto' ? (miUsuario.foto_orig || miUsuario.foto) : (miUsuario.fondo_orig || miUsuario.fondoChat);
+                if (srcActualOrig) {
+                    cargarImagenEnEditor(srcActualOrig);
                 } else {
                     alert("Selecciona un archivo primero o añade una imagen.");
                 }
@@ -990,10 +973,7 @@ HTML_LAYOUT = """
             editorImg = new Image();
             editorImg.crossOrigin = "anonymous";
             editorImg.onload = () => {
-                imgX = 150;
-                imgY = 150;
-                imgScale = 1.0;
-                imgAngle = 0;
+                imgX = 150; imgY = 150; imgScale = 1.0; imgAngle = 0;
                 document.getElementById('editorZoomSlider').value = 1.0;
                 document.getElementById('imageEditorModal').style.display = 'flex';
                 initCanvasEvents();
@@ -1007,48 +987,23 @@ HTML_LAYOUT = """
             if (rotateInterval) clearInterval(rotateInterval);
         }
 
-        function onZoomSliderChange(val) {
-            imgScale = parseFloat(val);
-            renderEditorCanvas();
-        }
+        function onZoomSliderChange(val) { imgScale = parseFloat(val); renderEditorCanvas(); }
 
         function initCanvasEvents() {
             const canvas = document.getElementById('editorCanvas');
-            
             canvas.onmousedown = (e) => handleStart(e.clientX, e.clientY);
             canvas.onmousemove = (e) => handleMove(e.clientX, e.clientY);
             canvas.onmouseup = canvas.onmouseleave = () => handleEnd();
-
-            canvas.ontouchstart = (e) => {
-                if (e.touches.length === 1) {
-                    handleStart(e.touches[0].clientX, e.touches[0].clientY);
-                }
-            };
-            canvas.ontouchmove = (e) => {
-                if (e.touches.length === 1) {
-                    handleMove(e.touches[0].clientX, e.touches[0].clientY);
-                }
-            };
+            canvas.ontouchstart = (e) => { if (e.touches.length === 1) handleStart(e.touches[0].clientX, e.touches[0].clientY); };
+            canvas.ontouchmove = (e) => { if (e.touches.length === 1) handleMove(e.touches[0].clientX, e.touches[0].clientY); };
             canvas.ontouchend = () => handleEnd();
 
-            // Configurar botón de rotación continua
             const rotateBtn = document.getElementById('rotateHoldBtn');
-            
             const startRotate = () => {
                 if (rotateInterval) clearInterval(rotateInterval);
-                rotateInterval = setInterval(() => {
-                    imgAngle = (imgAngle + 3) % 360;
-                    renderEditorCanvas();
-                }, 30);
+                rotateInterval = setInterval(() => { imgAngle = (imgAngle + 3) % 360; renderEditorCanvas(); }, 30);
             };
-
-            const stopRotate = () => {
-                if (rotateInterval) {
-                    clearInterval(rotateInterval);
-                    rotateInterval = null;
-                }
-            };
-
+            const stopRotate = () => { if (rotateInterval) { clearInterval(rotateInterval); rotateInterval = null; } };
             rotateBtn.onmousedown = startRotate;
             rotateBtn.onmouseup = rotateBtn.onmouseleave = stopRotate;
             rotateBtn.ontouchstart = (e) => { e.preventDefault(); startRotate(); };
@@ -1058,35 +1013,19 @@ HTML_LAYOUT = """
         function getCanvasPoint(clientX, clientY) {
             const canvas = document.getElementById('editorCanvas');
             const rect = canvas.getBoundingClientRect();
-            return {
-                x: (clientX - rect.left) * (300 / rect.width),
-                y: (clientY - rect.top) * (300 / rect.height)
-            };
+            return { x: (clientX - rect.left) * (300 / rect.width), y: (clientY - rect.top) * (300 / rect.height) };
         }
 
         function handleStart(clientX, clientY) {
             const pt = getCanvasPoint(clientX, clientY);
-            
-            // Comprobar si se hace clic en alguna esquina de las 4 para escalar
             activeHandle = null;
             for (let i = 0; i < cornerPoints.length; i++) {
-                const dist = Math.hypot(pt.x - cornerPoints[i].x, pt.y - cornerPoints[i].y);
-                if (dist < 20) {
-                    activeHandle = i;
-                    break;
+                if (Math.hypot(pt.x - cornerPoints[i].x, pt.y - cornerPoints[i].y) < 20) {
+                    activeHandle = i; break;
                 }
             }
-
-            if (activeHandle !== null) {
-                dragStartX = clientX;
-                dragStartY = clientY;
-            } else {
-                isDragging = true;
-                dragStartX = clientX;
-                dragStartY = clientY;
-                dragStartImgX = imgX;
-                dragStartImgY = imgY;
-            }
+            if (activeHandle !== null) { dragStartX = clientX; dragStartY = clientY; } 
+            else { isDragging = true; dragStartX = clientX; dragStartY = clientY; dragStartImgX = imgX; dragStartImgY = imgY; }
         }
 
         function handleMove(clientX, clientY) {
@@ -1102,23 +1041,18 @@ HTML_LAYOUT = """
             } else if (isDragging) {
                 const pt = getCanvasPoint(clientX, clientY);
                 const ptStart = getCanvasPoint(dragStartX, dragStartY);
-                imgX = dragStartImgX + (pt.x - ptStart.x);
-                imgY = dragStartImgY + (pt.y - ptStart.y);
+                imgX = dragStartImgX + (pt.x - ptStart.x); imgY = dragStartImgY + (pt.y - ptStart.y);
                 renderEditorCanvas();
             }
         }
 
-        function handleEnd() {
-            isDragging = false;
-            activeHandle = null;
-        }
+        function handleEnd() { isDragging = false; activeHandle = null; }
 
         function renderEditorCanvas() {
             const canvas = document.getElementById('editorCanvas');
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, 300, 300);
 
-            // Dibujar imagen con transformación
             ctx.save();
             ctx.translate(imgX, imgY);
             ctx.rotate((imgAngle * Math.PI) / 180);
@@ -1126,39 +1060,29 @@ HTML_LAYOUT = """
             ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
             ctx.restore();
 
-            // Dibujar capa oscura con agujero (máscara)
             ctx.save();
             ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
             ctx.fillRect(0, 0, 300, 300);
 
             ctx.globalCompositeOperation = 'destination-out';
             ctx.beginPath();
-            if (editorTargetType === 'foto') {
-                ctx.arc(150, 150, 110, 0, Math.PI * 2);
-            } else {
-                ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
-            }
+            if (editorTargetType === 'foto') ctx.arc(150, 150, 110, 0, Math.PI * 2);
+            else ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
             ctx.fill();
             ctx.restore();
 
-            // Dibujar borde guía y los 4 puntos/asideros en las esquinas de la imagen
             ctx.save();
             ctx.strokeStyle = '#00a884';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            if (editorTargetType === 'foto') {
-                ctx.arc(150, 150, 110, 0, Math.PI * 2);
-            } else {
-                ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
-            }
+            if (editorTargetType === 'foto') ctx.arc(150, 150, 110, 0, Math.PI * 2);
+            else ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
             ctx.stroke();
 
-            // Calcular las 4 esquinas transformadas
             const w = (editorImg.width * imgScale) / 2;
             const h = (editorImg.height * imgScale) / 2;
             const rad = (imgAngle * Math.PI) / 180;
-            const cos = Math.cos(rad);
-            const sin = Math.sin(rad);
+            const cos = Math.cos(rad); const sin = Math.sin(rad);
 
             cornerPoints = [
                 { x: imgX + (-w * cos - -h * sin), y: imgY + (-w * sin + -h * cos) },
@@ -1167,26 +1091,16 @@ HTML_LAYOUT = """
                 { x: imgX + (-w * cos - h * sin), y: imgY + (-w * sin + h * cos) }
             ];
 
-            // Dibujar asideros en las 4 esquinas
             cornerPoints.forEach(pt => {
-                ctx.beginPath();
-                ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
-                ctx.fillStyle = '#00a884';
-                ctx.fill();
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = 2;
-                ctx.stroke();
+                ctx.beginPath(); ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+                ctx.fillStyle = '#00a884'; ctx.fill();
+                ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
             });
             ctx.restore();
         }
 
         function resetearEditorImagen() {
-            // Vuelve la posición/zoom/rotación al estado inicial (como cuando se cargó la imagen),
-            // sin cerrar el editor ni perder la imagen cargada.
-            imgX = 150;
-            imgY = 150;
-            imgScale = 1.0;
-            imgAngle = 0;
+            imgX = 150; imgY = 150; imgScale = 1.0; imgAngle = 0;
             document.getElementById('editorZoomSlider').value = 1.0;
             renderEditorCanvas();
         }
@@ -1197,62 +1111,47 @@ HTML_LAYOUT = """
 
             if (editorTargetType === 'foto') {
                 const size = 220;
-                offCanvas.width = size;
-                offCanvas.height = size;
+                offCanvas.width = size; offCanvas.height = size;
+                ctx.beginPath(); ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2); ctx.clip();
 
-                ctx.beginPath();
-                ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
-                ctx.clip();
+                const factor = size / 220; 
+                const offsetX = (imgX - 40) * factor; const offsetY = (imgY - 40) * factor;
 
-                const factor = size / 220; // relación del marco de 220px
-                const offsetX = (imgX - 40) * factor;
-                const offsetY = (imgY - 40) * factor;
-
-                ctx.translate(offsetX, offsetY);
-                ctx.rotate((imgAngle * Math.PI) / 180);
+                ctx.translate(offsetX, offsetY); ctx.rotate((imgAngle * Math.PI) / 180);
                 ctx.scale(imgScale * factor, imgScale * factor);
                 ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
-            } else {
-                // Salida rectangular (misma proporción que FONDO_RECT), no cuadrada.
-                const outW = 960;
-                const factor = outW / FONDO_RECT.w;
-                const outH = Math.round(FONDO_RECT.h * factor);
-                offCanvas.width = outW;
-                offCanvas.height = outH;
-
-                const offsetX = (imgX - FONDO_RECT.x) * factor;
-                const offsetY = (imgY - FONDO_RECT.y) * factor;
-
-                ctx.translate(offsetX, offsetY);
-                ctx.rotate((imgAngle * Math.PI) / 180);
-                ctx.scale(imgScale * factor, imgScale * factor);
-                ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
-            }
-
-            const editedData = offCanvas.toDataURL('image/jpeg', 0.85);
-
-            if (editorTargetType === 'foto') {
-                editedFotoBase64 = editedData;
+                
+                editedFotoBase64 = offCanvas.toDataURL('image/jpeg', 0.85);
                 document.getElementById('fotoEditedTag').style.display = 'block';
             } else {
-                editedFondoBase64 = editedData;
+                const outW = 960;
+                const factor = outW / FONDO_RECT.w; 
+                const outH = Math.round(FONDO_RECT.h * factor);
+                offCanvas.width = outW; offCanvas.height = outH;
+
+                const centerOffX = outW / 2;
+                const centerOffY = outH / 2;
+                
+                // Mapeo correcto de las coordenadas del canvas al lienzo de salida
+                const mapX = (imgX - 150) * factor;
+                const mapY = (imgY - 150) * factor;
+
+                ctx.translate(centerOffX + mapX, centerOffY + mapY);
+                ctx.rotate((imgAngle * Math.PI) / 180);
+                ctx.scale(imgScale * factor, imgScale * factor);
+                ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+                
+                editedFondoBase64 = offCanvas.toDataURL('image/jpeg', 0.85);
                 document.getElementById('fondoEditedTag').style.display = 'block';
             }
-
             cerrarEditorImagen();
         }
 
-        function cerrarSesion() {
-            localStorage.removeItem('arxechat_sesion');
-            location.reload();
-        }
+        function cerrarSesion() { localStorage.removeItem('arxechat_sesion'); location.reload(); }
 
         socket.on('contacto_resultado', (res) => {
-            if(!res.exito) {
-                alert(res.mensaje);
-            } else {
-                socket.emit('obtener_contactos', { id: miUsuario.id });
-            }
+            if(!res.exito) alert(res.mensaje);
+            else socket.emit('obtener_contactos', { id: miUsuario.id });
         });
 
         socket.on('contactos_cargados', (lista) => {
@@ -1264,23 +1163,21 @@ HTML_LAYOUT = """
             const listaDiv = document.getElementById('contactsList');
             listaDiv.innerHTML = '';
             
-            misContactos.sort((a, b) => (b.sinLeer || 0) - (a.sinLeer || 0));
+            // Ordena automáticamente por mensajes sin leer de mayor a menor
+            misContactos.sort((a, b) => (b.sinLeer || 0) - (a.sinLeer || 0) || a.nombre.localeCompare(b.nombre));
 
             misContactos.forEach(c => {
                 const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'contact-item';
+                btn.type = 'button'; btn.className = 'contact-item';
                 btn.onclick = () => seleccionarContacto(c);
                 
                 const avatarHtml = c.foto ? `<img src="${c.foto}" class="user-avatar">` : `<div class="user-avatar">${c.nombre.charAt(0).toUpperCase()}</div>`;
                 
                 let etiqueta = '';
-                if (c.esGrupo) {
-                    etiqueta = c.esGuardado ? '<span style="font-size:0.75rem; color:var(--accent);">(Grupo)</span>' : '<span style="font-size:0.75rem; color:#ea4335;">[Aceptar Grupo]</span>';
-                } else {
-                    etiqueta = c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>';
-                }
+                if (c.esGrupo) etiqueta = c.esGuardado ? '<span style="font-size:0.75rem; color:var(--accent);">(Grupo)</span>' : '<span style="font-size:0.75rem; color:#ea4335;">[Aceptar Grupo]</span>';
+                else etiqueta = c.esGuardado ? '' : '<span style="font-size:0.75rem; color:var(--accent);">(Nuevo)</span>';
 
+                // Mostrar círculo de sin leer como querías
                 const badgeHtml = (c.sinLeer && c.sinLeer > 0) ? `<span class="unread-badge">${c.sinLeer}</span>` : '';
 
                 btn.innerHTML = `
@@ -1297,6 +1194,7 @@ HTML_LAYOUT = """
 
         function seleccionarContacto(c) {
             contactoActivo = c;
+            const previousSinLeer = c.sinLeer;
             c.sinLeer = 0;
             renderizarContactos();
 
@@ -1305,17 +1203,13 @@ HTML_LAYOUT = """
             document.getElementById('activeName').innerText = c.nombre;
             document.getElementById('activeStatus').innerText = c.esGrupo ? "Grupo de chat" : "En línea";
             
-            if(window.innerWidth <= 768) {
-                document.getElementById('chatArea').classList.add('active-mobile');
-            }
+            if(window.innerWidth <= 768) document.getElementById('chatArea').classList.add('active-mobile');
 
             const bannerBtn = document.getElementById('btnAddContactBanner');
             if(!c.esGuardado) {
                 bannerBtn.style.display = 'inline-block';
                 bannerBtn.innerText = c.esGrupo ? "Aceptar Grupo" : "+ Añadir a contactos";
-            } else {
-                bannerBtn.style.display = 'none';
-            }
+            } else { bannerBtn.style.display = 'none'; }
 
             if(c.foto) {
                 document.getElementById('activeAvatarImg').src = c.foto;
@@ -1329,15 +1223,16 @@ HTML_LAYOUT = """
             
             document.getElementById('messages').innerHTML = '';
             socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: c.id, esGrupo: c.esGrupo });
+            
+            if (previousSinLeer > 0) {
+                socket.emit('marcar_leido', { emisor: miUsuario.id, receptor: c.id, esGrupo: c.esGrupo });
+            }
         }
 
         function guardarContactoOAceptarGrupo() {
             if(contactoActivo) {
-                if(contactoActivo.esGrupo) {
-                    socket.emit('aceptar_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
-                } else {
-                    socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
-                }
+                if(contactoActivo.esGrupo) socket.emit('aceptar_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
+                else socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 contactoActivo.esGuardado = true;
                 document.getElementById('btnAddContactBanner').style.display = 'none';
             }
@@ -1355,17 +1250,13 @@ HTML_LAYOUT = """
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
                 document.getElementById('emptyState').style.display = 'flex';
-                if(window.innerWidth <= 768) {
-                    document.getElementById('chatArea').classList.remove('active-mobile');
-                }
+                if(window.innerWidth <= 768) document.getElementById('chatArea').classList.remove('active-mobile');
                 contactoActivo = null;
             }
         }
 
         function formatearTextoConLinks(texto) {
-            if (texto.startsWith('<img') || texto.startsWith('📁 <a')) {
-                return texto;
-            }
+            if (texto.startsWith('<img') || texto.startsWith('📁 <a')) return texto;
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             return texto.replace(urlRegex, function(url) {
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
@@ -1391,15 +1282,10 @@ HTML_LAYOUT = """
             msgElement.className = `message ${esMio ? 'sent' : 'received'}`;
 
             let senderHeader = '';
-            if(!esMio && contactoActivo.esGrupo) {
-                senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
-            }
+            if(!esMio && contactoActivo.esGrupo) senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
 
             msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}`;
-            
-            rowDiv.innerHTML = avatarHtml;
-            rowDiv.appendChild(msgElement);
-
+            rowDiv.innerHTML = avatarHtml; rowDiv.appendChild(msgElement);
             messagesDiv.appendChild(rowDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
@@ -1416,9 +1302,6 @@ HTML_LAYOUT = """
                 (!contactoActivo.esGrupo && (data.emisor === contactoActivo.id || (data.emisor === miUsuario.id && data.receptor === contactoActivo.id)))
             );
 
-            // Si es el eco de un mensaje que yo mismo mandé, ya lo pinté al instante
-            // al pulsar "Enviar" (ver sendMessage). Si encontramos su fila por tempId,
-            // no lo volvemos a pintar para no duplicarlo.
             if (data.emisor === miUsuario.id && data.tempId) {
                 const filaExistente = document.querySelector(`[data-temp-id="${data.tempId}"]`);
                 if (filaExistente) return;
@@ -1426,9 +1309,7 @@ HTML_LAYOUT = """
 
             if (esDelChatActivo) {
                 renderizarMensaje(data);
-                if (data.emisor !== miUsuario.id) {
-                    socket.emit('marcar_leido', { emisor: miUsuario.id, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo });
-                }
+                if (data.emisor !== miUsuario.id) socket.emit('marcar_leido', { emisor: miUsuario.id, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo });
             } else {
                 socket.emit('obtener_contactos', { id: miUsuario.id });
             }
@@ -1446,20 +1327,8 @@ HTML_LAYOUT = """
             const texto = input.value.trim();
             if (texto !== '' && contactoActivo) {
                 const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-                const msgOptimista = {
-                    emisor: miUsuario.id,
-                    nombreEmisor: miUsuario.nombre,
-                    fotoEmisor: miUsuario.foto,
-                    receptor: contactoActivo.id,
-                    esGrupo: contactoActivo.esGrupo ? 1 : 0,
-                    texto: texto,
-                    tempId: tempId
-                };
-
-                // Se pinta al instante en la propia pantalla; ya no se espera a que
-                // el mensaje complete el viaje de ida y vuelta al servidor para verlo.
+                const msgOptimista = { emisor: miUsuario.id, nombreEmisor: miUsuario.nombre, fotoEmisor: miUsuario.foto, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo ? 1 : 0, texto: texto, tempId: tempId };
                 renderizarMensaje(msgOptimista, tempId);
-
                 socket.emit('mensaje_enviado', msgOptimista);
                 input.value = '';
             }
@@ -1468,54 +1337,32 @@ HTML_LAYOUT = """
         async function manejarAdjunto(input) {
             if (!input.files || input.files.length === 0 || !contactoActivo) return;
             const file = input.files[0];
-            
-            if (file.size > 8 * 1024 * 1024) {
-                alert("El archivo supera el límite de 8 MB.");
-                input.value = '';
-                return;
-            }
-
+            if (file.size > 8 * 1024 * 1024) { alert("El archivo supera el límite de 8 MB."); input.value = ''; return; }
             let mensajeContenido = '';
-
             if (file.type.startsWith('image/')) {
                 const imgBase64 = await convertAndCompressBase64(file);
                 mensajeContenido = `<img src="${imgBase64}" style="max-width: 100%; border-radius: 8px; margin-top: 5px; display: block;">`;
             } else {
-                const reader = new FileReader();
-                reader.readAsDataURL(file);
+                const reader = new FileReader(); reader.readAsDataURL(file);
                 reader.onload = () => {
-                    const base64Data = reader.result;
-                    mensajeContenido = `📁 <a href="${base64Data}" download="${file.name}" style="color:var(--link-color); text-decoration:underline; font-weight:bold;">${file.name}</a>`;
-                    enviarMensajeAdjunto(mensajeContenido);
-                    input.value = '';
+                    mensajeContenido = `📁 <a href="${reader.result}" download="${file.name}" style="color:var(--link-color); text-decoration:underline; font-weight:bold;">${file.name}</a>`;
+                    enviarMensajeAdjunto(mensajeContenido); input.value = '';
                 };
                 return;
             }
-
-            enviarMensajeAdjunto(mensajeContenido);
-            input.value = '';
+            enviarMensajeAdjunto(mensajeContenido); input.value = '';
         }
 
         function enviarMensajeAdjunto(texto) {
             if (contactoActivo) {
                 const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-                const msgOptimista = {
-                    emisor: miUsuario.id,
-                    nombreEmisor: miUsuario.nombre,
-                    fotoEmisor: miUsuario.foto,
-                    receptor: contactoActivo.id,
-                    esGrupo: contactoActivo.esGrupo ? 1 : 0,
-                    texto: texto,
-                    tempId: tempId
-                };
+                const msgOptimista = { emisor: miUsuario.id, nombreEmisor: miUsuario.nombre, fotoEmisor: miUsuario.foto, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo ? 1 : 0, texto: texto, tempId: tempId };
                 renderizarMensaje(msgOptimista, tempId);
                 socket.emit('mensaje_enviado', msgOptimista);
             }
         }
 
-        document.getElementById('messageInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-        });
+        document.getElementById('messageInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
     </script>
 </body>
 </html>
@@ -1527,14 +1374,11 @@ def home():
 
 @socketio.on('conectar_usuario')
 def conectar(data):
-    from flask_socketio import join_room
     join_room(data['id'])
-    
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = %s", (data['id'],))
-    for r in cursor.fetchall():
-        join_room(r['grupo_id'])
+    for r in cursor.fetchall(): join_room(r['grupo_id'])
     cursor.close()
     conn.close()
 
@@ -1548,12 +1392,12 @@ def registrar(data):
     
     if row:
         nuevo_id = row['id']
-        cursor.execute("UPDATE usuarios SET pass = %s, foto = %s WHERE id = %s", (data['pass'], data.get('foto'), nuevo_id))
+        cursor.execute("UPDATE usuarios SET pass = %s, foto = %s, foto_orig = %s WHERE id = %s", (data['pass'], data.get('foto'), data.get('foto_orig'), nuevo_id))
     else:
         nuevo_id = str(random.randint(10000000, 99999999))
         cursor.execute(
-            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100, 'default', 'default')
+            "INSERT INTO usuarios (id, nombre, pass, foto, foto_orig, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (nuevo_id, nombre, data['pass'], data.get('foto'), data.get('foto_orig'), None, 'dark', 100, 'default', 'default')
         )
     conn.commit()
     
@@ -1561,7 +1405,6 @@ def registrar(data):
     nuevo_usuario = dict(cursor.fetchone())
     cursor.close()
     conn.close()
-
     emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
 
 @socketio.on('login_usuario')
@@ -1575,8 +1418,7 @@ def login(data):
     conn.close()
     
     if row and row['pass'] == data['pass']:
-        usuario = dict(row)
-        emit('auth_resultado', {'exito': True, 'usuario': usuario})
+        emit('auth_resultado', {'exito': True, 'usuario': dict(row)})
     else:
         emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
 
@@ -1595,7 +1437,9 @@ def actualizar_perfil(data):
     nuevo_nombre = data['nombre']
     nueva_pass = data['pass'] if data['pass'] else row['pass']
     nueva_foto = data['foto']
+    nueva_foto_orig = data.get('foto_orig', row.get('foto_orig'))
     nuevo_fondo = data.get('fondoChat')
+    nuevo_fondo_orig = data.get('fondo_orig', row.get('fondo_orig'))
     nuevo_tema = data.get('tema', 'dark')
     nuevo_brillo = data.get('brilloFondo', 100)
     nuevo_color_sent = data.get('color_sent', 'default')
@@ -1603,408 +1447,311 @@ def actualizar_perfil(data):
 
     cursor.execute("""
         UPDATE usuarios 
-        SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s, color_sent = %s, color_recv = %s 
+        SET nombre = %s, pass = %s, foto = %s, foto_orig = %s, fondoChat = %s, fondo_orig = %s, tema = %s, brilloFondo = %s, color_sent = %s, color_recv = %s 
         WHERE id = %s
-    """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, nuevo_color_sent, nuevo_color_recv, data['id']))
+    """, (nuevo_nombre, nueva_pass, nueva_foto, nueva_foto_orig, nuevo_fondo, nuevo_fondo_orig, nuevo_tema, nuevo_brillo, nuevo_color_sent, nuevo_color_recv, data['id']))
     conn.commit()
 
     cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
     u_updated = dict(cursor.fetchone())
     cursor.close()
     conn.close()
-    
     emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
 
-@socketio.on('crear_grupo')
-def crear_grupo(data):
-    from flask_socketio import join_room
-    grupo_id = "GRP_" + str(random.randint(10000000, 99999999))
-    nombre = data['nombre']
-    foto = data.get('foto')
-    creador_id = data['creador_id']
-    miembros = list(set(data.get('miembros', [])))
-
+@socketio.on('obtener_contactos')
+def obtener_contactos(data):
+    mi_id = data['id']
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (%s, %s, %s, %s)",
-                   (grupo_id, nombre, foto, creador_id))
     
-    for m_id in miembros:
-        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (m_id,))
-        if cursor.fetchone():
-            aceptado = 1 if m_id == creador_id else 0
-            cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                           (grupo_id, m_id, aceptado))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    join_room(grupo_id)
-    emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
-
-@socketio.on('obtener_detalles_grupo')
-def obtener_detalles_grupo(data):
-    grupo_id = data['grupo_id']
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
-    grupo_row = cursor.fetchone()
-    creador_id = grupo_row['creador_id'] if grupo_row else None
-
     cursor.execute("""
         SELECT u.id, u.nombre, u.foto 
-        FROM miembros_grupo mg 
-        JOIN usuarios u ON mg.usuario_id = u.id 
-        WHERE mg.grupo_id = %s
-    """, (grupo_id,))
-    miembros = [dict(r) for r in cursor.fetchall()]
+        FROM contactos c
+        JOIN usuarios u ON c.contacto_id = u.id
+        WHERE c.mi_id = %s
+    """, (mi_id,))
+    contactos_db = cursor.fetchall()
+    
+    cursor.execute("""
+        SELECT g.id, g.nombre, g.foto, mg.aceptado
+        FROM miembros_grupo mg
+        JOIN grupos g ON mg.grupo_id = g.id
+        WHERE mg.usuario_id = %s
+    """, (mi_id,))
+    grupos_db = cursor.fetchall()
+    
+    # Lógica de mensajes sin leer (directos)
+    cursor.execute("""
+        SELECT emisor, COUNT(*) as sin_leer
+        FROM mensajes
+        WHERE receptor = %s AND es_grupo = 0 AND leido = 0
+        GROUP BY emisor
+    """, (mi_id,))
+    unread_direct = {row['emisor']: row['sin_leer'] for row in cursor.fetchall()}
+    
+    # Lógica de mensajes sin leer (grupos)
+    cursor.execute("""
+        SELECT receptor as grupo_id, COUNT(*) as sin_leer
+        FROM mensajes
+        WHERE receptor IN (SELECT grupo_id FROM miembros_grupo WHERE usuario_id = %s)
+          AND es_grupo = 1 
+          AND emisor != %s 
+          AND leido = 0
+        GROUP BY receptor
+    """, (mi_id, mi_id))
+    unread_groups = {row['grupo_id']: row['sin_leer'] for row in cursor.fetchall()}
+    
+    lista = []
+    for c in contactos_db:
+        c_dict = dict(c)
+        c_dict['esGrupo'] = False
+        c_dict['esGuardado'] = True
+        c_dict['sinLeer'] = unread_direct.get(c_dict['id'], 0)
+        lista.append(c_dict)
+        
+    for g in grupos_db:
+        g_dict = dict(g)
+        g_dict['esGrupo'] = True
+        g_dict['esGuardado'] = (g_dict['aceptado'] == 1)
+        g_dict['sinLeer'] = unread_groups.get(g_dict['id'], 0)
+        lista.append(g_dict)
+        
+    # Personas que han enviado mensaje pero no están en contactos
+    cursor.execute("""
+        SELECT DISTINCT emisor as id, nombreEmisor as nombre, fotoEmisor as foto
+        FROM mensajes
+        WHERE receptor = %s AND es_grupo = 0 AND emisor NOT IN (SELECT contacto_id FROM contactos WHERE mi_id = %s)
+    """, (mi_id, mi_id))
+    nuevos = cursor.fetchall()
+    for n in nuevos:
+        if n['id'] == mi_id: continue
+        n_dict = dict(n)
+        n_dict['esGrupo'] = False
+        n_dict['esGuardado'] = False
+        n_dict['sinLeer'] = unread_direct.get(n_dict['id'], 0)
+        lista.append(n_dict)
+        
     cursor.close()
     conn.close()
-    emit('detalles_grupo_cargados', {'miembros': miembros, 'creador_id': creador_id})
+    emit('contactos_cargados', lista)
 
-@socketio.on('actualizar_grupo')
-def actualizar_grupo(data):
-    grupo_id = data['grupo_id']
-    nombre = data['nombre']
-    foto = data.get('foto')
-    usuario_id = data.get('usuario_id')
-
+@socketio.on('cargar_historial')
+def cargar_historial(data):
+    emisor = data['emisor']
+    receptor = data['receptor']
+    es_grupo = data['esGrupo']
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
-    grupo_row = cursor.fetchone()
-    if not grupo_row or grupo_row['creador_id'] != usuario_id:
-        cursor.close()
-        conn.close()
-        emit('grupo_actualizado', {'exito': False, 'mensaje': 'Solo el creador del grupo puede cambiar el nombre o la foto.'})
-        return
-
-    if foto:
-        cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s", (nombre, foto, grupo_id))
+    
+    if es_grupo:
+        cursor.execute("SELECT vaciado_en FROM chat_vaciado WHERE clave_chat = %s AND usuario_id = %s", (receptor, emisor))
     else:
-        cursor.execute("UPDATE grupos SET nombre = %s WHERE id = %s", (nombre, grupo_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    emit('grupo_actualizado', {'exito': True})
+        c1, c2 = f"{emisor}_{receptor}", f"{receptor}_{emisor}"
+        cursor.execute("SELECT vaciado_en FROM chat_vaciado WHERE (clave_chat = %s OR clave_chat = %s) AND usuario_id = %s", (c1, c2, emisor))
+    
+    row_v = cursor.fetchone()
+    vaciado_en = row_v['vaciado_en'] if row_v else None
 
-@socketio.on('agregar_miembro_grupo')
-def agregar_miembro_grupo(data):
-    grupo_id = data['grupo_id']
-    usuario_id = data['usuario_id']  # quien hace la petición
-    id_o_nombre = data['id_o_nombre'].strip()
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
-    grupo_row = cursor.fetchone()
-    if not grupo_row or grupo_row['creador_id'] != usuario_id:
-        cursor.close()
-        conn.close()
-        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'Solo el creador del grupo puede añadir miembros.'})
-        return
-
-    # Se admite el ID de 8 dígitos directamente, o el nombre si esa persona está en mis contactos.
-    nuevo_id = None
-    if id_o_nombre.isdigit() and len(id_o_nombre) == 8:
-        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (id_o_nombre,))
-        row = cursor.fetchone()
-        if row:
-            nuevo_id = row['id']
+    if es_grupo:
+        query = "SELECT * FROM mensajes WHERE receptor = %s AND es_grupo = 1"
+        params = [receptor]
     else:
-        cursor.execute("""
-            SELECT u.id FROM contactos c
-            JOIN usuarios u ON c.contacto_id = u.id
-            WHERE c.mi_id = %s AND u.nombre = %s
-        """, (usuario_id, id_o_nombre))
-        row = cursor.fetchone()
-        if row:
-            nuevo_id = row['id']
-
-    if not nuevo_id:
-        cursor.close()
-        conn.close()
-        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'No se ha encontrado a esa persona (usa su ID de 8 dígitos, o su nombre si está en tus contactos).'})
-        return
-
-    cursor.execute("SELECT usuario_id FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s", (grupo_id, nuevo_id))
-    if cursor.fetchone():
-        cursor.close()
-        conn.close()
-        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'Esa persona ya está en el grupo.'})
-        return
-
-    cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, 0)", (grupo_id, nuevo_id))
+        query = "SELECT * FROM mensajes WHERE ((emisor = %s AND receptor = %s) OR (emisor = %s AND receptor = %s)) AND es_grupo = 0"
+        params = [emisor, receptor, receptor, emisor]
+        
+    if vaciado_en:
+        query += " AND fecha > %s"
+        params.append(vaciado_en)
+        
+    query += " ORDER BY fecha ASC"
+    cursor.execute(query, tuple(params))
+    mensajes = cursor.fetchall()
+    
+    # Marcamos leídos al cargar historial
+    if es_grupo:
+        cursor.execute("UPDATE mensajes SET leido = 1 WHERE receptor = %s AND es_grupo = 1 AND emisor != %s", (receptor, emisor))
+    else:
+        cursor.execute("UPDATE mensajes SET leido = 1 WHERE emisor = %s AND receptor = %s AND es_grupo = 0", (receptor, emisor))
+    
     conn.commit()
     cursor.close()
     conn.close()
+    emit('historial_cargado', [dict(m) for m in mensajes])
 
-    emit('miembro_agregado_resultado', {'exito': True, 'mensaje': 'Miembro añadido.'})
-    obtener_detalles_grupo({'grupo_id': grupo_id})
-    # Avisa al nuevo miembro (si tiene sesión abierta) para que le aparezca el grupo con el banner de "Aceptar Grupo".
-    socketio.emit('grupo_actualizado_para_ti', {}, room=nuevo_id)
-
-@socketio.on('eliminar_grupo')
-def eliminar_grupo(data):
-    grupo_id = data['grupo_id']
-    usuario_id = data['usuario_id']
-
+@socketio.on('mensaje_enviado')
+def mensaje_enviado(data):
+    emisor = data['emisor']
+    receptor = data['receptor']
+    es_grupo = data['esGrupo']
+    texto = data['texto']
+    
+    clave_chat = receptor if es_grupo else f"{emisor}_{receptor}"
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
-    grupo_row = cursor.fetchone()
-    if not grupo_row or grupo_row['creador_id'] != usuario_id:
-        cursor.close()
-        conn.close()
-        emit('grupo_eliminado_resultado', {'exito': False, 'mensaje': 'Solo el creador del grupo puede eliminarlo.'})
-        return
-
-    cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s", (grupo_id,))
-    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s", (grupo_id,))
-    cursor.execute("DELETE FROM grupos WHERE id = %s", (grupo_id,))
+    cursor.execute("""
+        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 0) RETURNING id, fecha
+    """, (clave_chat, emisor, receptor, texto, data.get('nombreEmisor', 'Usuario'), data.get('fotoEmisor'), es_grupo))
+    msg_id = cursor.fetchone()
     conn.commit()
     cursor.close()
     conn.close()
+    
+    msg_obj = data.copy()
+    msg_obj['id'] = msg_id['id']
+    msg_obj['fecha'] = str(msg_id['fecha'])
+    
+    if es_grupo:
+        emit('recibir_mensaje', msg_obj, to=receptor)
+    else:
+        emit('recibir_mensaje', msg_obj, to=receptor)
+        emit('recibir_mensaje', msg_obj, to=emisor)
 
-    # Se elimina para todo el mundo: se avisa a todos los que tuvieran el grupo abierto.
-    socketio.emit('grupo_eliminado', {'grupo_id': grupo_id}, room=grupo_id)
-    emit('grupo_eliminado_resultado', {'exito': True})
+@socketio.on('guardar_contacto')
+def guardar_contacto(data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO contactos (mi_id, contacto_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (data['mi_id'], data['contacto_id']))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    emit('contacto_resultado', {'exito': True})
 
 @socketio.on('aceptar_grupo')
 def aceptar_grupo(data):
-    from flask_socketio import join_room
+    join_room(data['grupo_id'])
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = %s AND usuario_id = %s",
-                   (data['grupo_id'], data['usuario_id']))
+    cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = %s AND usuario_id = %s", (data['grupo_id'], data['usuario_id']))
     conn.commit()
     cursor.close()
     conn.close()
-    join_room(data['grupo_id'])
-    emit('grupo_aceptado', {'grupo_id': data['grupo_id']})
+    emit('grupo_aceptado', {'exito': True})
+
+@socketio.on('eliminar_contacto')
+def eliminar_contacto(data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (data['mi_id'], data['contacto_id']))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    obtener_contactos({'id': data['mi_id']})
+
+@socketio.on('vaciar_conversacion')
+def vaciar_conversacion(data):
+    emisor = data['mi_id']
+    receptor = data['contacto_id']
+    conn = get_db()
+    cursor = conn.cursor()
+    if receptor.startswith("GRP_"):
+        clave = receptor
+    else:
+        clave, clave2 = f"{emisor}_{receptor}", f"{receptor}_{emisor}"
+        cursor.execute("INSERT INTO chat_vaciado (clave_chat, usuario_id, vaciado_en) VALUES (%s, %s, CURRENT_TIMESTAMP) ON CONFLICT (clave_chat, usuario_id) DO UPDATE SET vaciado_en = CURRENT_TIMESTAMP", (clave2, emisor))
+    cursor.execute("INSERT INTO chat_vaciado (clave_chat, usuario_id, vaciado_en) VALUES (%s, %s, CURRENT_TIMESTAMP) ON CONFLICT (clave_chat, usuario_id) DO UPDATE SET vaciado_en = CURRENT_TIMESTAMP", (clave, emisor))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    emit('conversacion_vaciada', {'exito': True})
 
 @socketio.on('salir_grupo')
 def salir_grupo(data):
+    leave_room(data['grupo_id'])
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s",
-                   (data['grupo_id'], data['usuario_id']))
+    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s", (data['grupo_id'], data['usuario_id']))
     conn.commit()
     cursor.close()
     conn.close()
     obtener_contactos({'id': data['usuario_id']})
 
-@socketio.on('obtener_contactos')
-def obtener_contactos(data):
-    mi_id = data['id']
-    lista = []
-    ids_agregados = set()
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    # Antes esto hacía 1 consulta extra POR CADA contacto/grupo para contar los no leídos
-    # (con 15-20 chats, eran 15-20 idas y vueltas a la base de datos = varios segundos).
-    # Ahora se calculan todos los no leídos en una sola consulta agrupada.
-    cursor.execute("""
-        SELECT clave_chat, COUNT(*) as unread
-        FROM mensajes
-        WHERE emisor != %s AND leido = 0
-        GROUP BY clave_chat
-    """, (mi_id,))
-    unread_por_clave = {r['clave_chat']: r['unread'] for r in cursor.fetchall()}
-
-    cursor.execute("""
-        SELECT u.id, u.nombre, u.foto 
-        FROM contactos c 
-        JOIN usuarios u ON c.contacto_id = u.id 
-        WHERE c.mi_id = %s
-    """, (mi_id,))
-    for r in cursor.fetchall():
-        clave = "_".join(sorted([mi_id, r['id']]))
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0)})
-        ids_agregados.add(r['id'])
-
-    cursor.execute("""
-        SELECT DISTINCT emisor, receptor 
-        FROM mensajes 
-        WHERE (emisor = %s OR receptor = %s) AND es_grupo = 0
-    """, (mi_id, mi_id))
-
-    otros_ids = set()
-    for r in cursor.fetchall():
-        otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
-        if otro_id not in ids_agregados:
-            otros_ids.add(otro_id)
-
-    if otros_ids:
-        cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ANY(%s)", (list(otros_ids),))
-        for u in cursor.fetchall():
-            clave = "_".join(sorted([mi_id, u['id']]))
-            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0)})
-            ids_agregados.add(u['id'])
-
-    cursor.execute("""
-        SELECT g.id, g.nombre, g.foto, mg.aceptado 
-        FROM miembros_grupo mg 
-        JOIN grupos g ON mg.grupo_id = g.id 
-        WHERE mg.usuario_id = %s
-    """, (mi_id,))
-    for r in cursor.fetchall():
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread_por_clave.get(r['id'], 0)})
-
-    cursor.close()
-    conn.close()
-    emit('contactos_cargados', lista)
-
-@socketio.on('guardar_contacto')
-def guardar_contacto(data):
-    mi_id = data['mi_id']
-    contacto_id = data['contacto_id']
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM usuarios WHERE id = %s", (contacto_id,))
-    if not cursor.fetchone():
-        cursor.close()
-        conn.close()
-        emit('contacto_resultado', {'exito': False, 'mensaje': 'El ID introducido no existe.'})
-        return
-
-    cursor.execute("INSERT INTO contactos (mi_id, contacto_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (mi_id, contacto_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    emit('contacto_resultado', {'exito': True, 'mensaje': 'Contacto añadido.'})
-
-@socketio.on('eliminar_contacto')
-def eliminar_contacto(data):
-    mi_id = data['mi_id']
-    contacto_id = data['contacto_id']
-
-    # "Eliminar contacto" solo quita a la persona de tu lista. La conversación NO se borra:
-    # si te vuelve a escribir, seguirá llegando (aparecerá como chat no guardado, igual que
-    # cualquier conversación con alguien que no está en tus contactos).
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (mi_id, contacto_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    obtener_contactos({'id': mi_id})
-
-@socketio.on('vaciar_conversacion')
-def vaciar_conversacion(data):
-    mi_id = data['mi_id']
-    contacto_id = data['contacto_id']
-    clave_chat = "_".join(sorted([mi_id, contacto_id]))
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    # Marca la conversación como vaciada SOLO para mí (a partir de ahora ya no veo los mensajes
-    # anteriores). Para el otro usuario sigue intacta hasta que él también la vacíe.
-    cursor.execute("""
-        INSERT INTO chat_vaciado (clave_chat, usuario_id, vaciado_en)
-        VALUES (%s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (clave_chat, usuario_id) DO UPDATE SET vaciado_en = CURRENT_TIMESTAMP
-    """, (clave_chat, mi_id))
-
-    # Si ambas partes de la conversación ya la han vaciado, se borra de verdad para ahorrar espacio.
-    cursor.execute("SELECT usuario_id FROM chat_vaciado WHERE clave_chat = %s", (clave_chat,))
-    quienes_vaciaron = {r['usuario_id'] for r in cursor.fetchall()}
-    ambos_ids = set(clave_chat.split("_"))
-    if ambos_ids.issubset(quienes_vaciaron):
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s", (clave_chat,))
-        cursor.execute("DELETE FROM chat_vaciado WHERE clave_chat = %s", (clave_chat,))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    emit('conversacion_vaciada', {'contacto_id': contacto_id})
-
-@socketio.on('cargar_historial')
-def cargar_historial(data):
-    es_grupo = data.get('esGrupo', False)
-    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    mi_id = data['emisor']
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
-    conn.commit()
-
-    if es_grupo:
-        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
-    else:
-        # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
-        cursor.execute("""
-            SELECT m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor
-            FROM mensajes m
-            WHERE m.clave_chat = %s
-              AND m.fecha > COALESCE(
-                  (SELECT vaciado_en FROM chat_vaciado WHERE clave_chat = %s AND usuario_id = %s),
-                  '-infinity'::timestamp
-              )
-            ORDER BY m.fecha ASC
-        """, (clave_chat, clave_chat, mi_id))
-
-    historial = [dict(r) for r in cursor.fetchall()]
-    cursor.close()
-    conn.close()
-
-    emit('historial_cargado', historial)
-    obtener_contactos({'id': mi_id})
-
 @socketio.on('marcar_leido')
 def marcar_leido(data):
-    es_grupo = data.get('esGrupo', False)
-    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    mi_id = data['emisor']
-    
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    obtener_contactos({'id': mi_id})
-
-@socketio.on('mensaje_enviado')
-def manejar_mensaje(data):
-    es_grupo = data.get('esGrupo', 0)
-    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
-    """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    nuevo_msg = {
-        'clave_chat': clave_chat,
-        'emisor': data['emisor'],
-        'receptor': data['receptor'],
-        'texto': data['texto'],
-        'nombreEmisor': data['nombreEmisor'],
-        'fotoEmisor': data.get('fotoEmisor'),
-        'esGrupo': es_grupo,
-        'tempId': data.get('tempId')
-    }
-
-    if es_grupo:
-        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+    if data['esGrupo']:
+        cursor.execute("UPDATE mensajes SET leido = 1 WHERE receptor = %s AND es_grupo = 1 AND emisor != %s", (data['receptor'], data['emisor']))
     else:
-        emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
-        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+        cursor.execute("UPDATE mensajes SET leido = 1 WHERE emisor = %s AND receptor = %s AND es_grupo = 0", (data['receptor'], data['emisor']))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+@socketio.on('crear_grupo')
+def crear_grupo(data):
+    grupo_id = "GRP_" + str(random.randint(10000000, 99999999))
+    nombre = data['nombre']
+    foto = data.get('foto')
+    creador_id = data['creador_id']
+    miembros = list(set(data.get('miembros', [])))
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (%s, %s, %s, %s)", (grupo_id, nombre, foto, creador_id))
+    for m_id in miembros:
+        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (m_id,))
+        if cursor.fetchone():
+            aceptado = 1 if m_id == creador_id else 0
+            cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (grupo_id, m_id, aceptado))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    join_room(grupo_id)
+    emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
+
+@socketio.on('obtener_detalles_grupo')
+def obtener_detalles_grupo(data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (data['grupo_id'],))
+    g = cursor.fetchone()
+    if not g: return
+    cursor.execute("SELECT u.id, u.nombre FROM miembros_grupo mg JOIN usuarios u ON mg.usuario_id = u.id WHERE mg.grupo_id = %s", (data['grupo_id'],))
+    miembros = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    emit('detalles_grupo_cargados', {'creador_id': g['creador_id'], 'miembros': [dict(m) for m in miembros]})
+
+@socketio.on('actualizar_grupo')
+def actualizar_grupo(data):
+    conn = get_db()
+    cursor = conn.cursor()
+    if data.get('foto'):
+        cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s AND creador_id = %s", (data['nombre'], data['foto'], data['grupo_id'], data['usuario_id']))
+    else:
+        cursor.execute("UPDATE grupos SET nombre = %s WHERE id = %s AND creador_id = %s", (data['nombre'], data['grupo_id'], data['usuario_id']))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    emit('grupo_actualizado', {'exito': True}, to=data['grupo_id'])
+
+@socketio.on('agregar_miembro_grupo')
+def agregar_miembro_grupo(data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM usuarios WHERE id = %s OR nombre = %s", (data['id_o_nombre'], data['id_o_nombre']))
+    u = cursor.fetchone()
+    if not u:
+        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'Usuario no encontrado'})
+        return
+    cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, 0) ON CONFLICT DO NOTHING", (data['grupo_id'], u['id']))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    emit('miembro_agregado_resultado', {'exito': True, 'mensaje': 'Usuario añadido al grupo'})
+    emit('grupo_actualizado_para_ti', {}, to=u['id'])
+
+@socketio.on('eliminar_grupo')
+def eliminar_grupo(data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM grupos WHERE id = %s AND creador_id = %s", (data['grupo_id'], data['usuario_id']))
+    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s", (data['grupo_id'],))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    emit('grupo_eliminado', {'grupo_id': data['grupo_id']}, to=data['grupo_id'])
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
+    # No es necesario forzar hilos. Gunicorn/Render lo gestionará de la mejor manera.
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
