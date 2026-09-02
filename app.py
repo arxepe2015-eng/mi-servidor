@@ -1,6 +1,7 @@
 import os
-import sqlite3
 import random
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
 
@@ -9,73 +10,76 @@ app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
 
-DB_NAME = 'arxechat.db'
+# Variable de entorno para la base de datos (se configura en Render o local)
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
 def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 def init_db():
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id TEXT PRIMARY KEY,
-                nombre TEXT UNIQUE,
-                pass TEXT,
-                foto TEXT,
-                fondoChat TEXT,
-                tema TEXT DEFAULT 'dark',
-                brilloFondo INTEGER DEFAULT 100
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS contactos (
-                mi_id TEXT,
-                contacto_id TEXT,
-                PRIMARY KEY (mi_id, contacto_id)
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS grupos (
-                id TEXT PRIMARY KEY,
-                nombre TEXT,
-                foto TEXT,
-                creador_id TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS miembros_grupo (
-                grupo_id TEXT,
-                usuario_id TEXT,
-                aceptado INTEGER DEFAULT 0,
-                PRIMARY KEY (grupo_id, usuario_id)
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS mensajes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                clave_chat TEXT,
-                emisor TEXT,
-                receptor TEXT,
-                texto TEXT,
-                nombreEmisor TEXT,
-                fotoEmisor TEXT,
-                es_grupo INTEGER DEFAULT 0,
-                leido INTEGER DEFAULT 0,
-                fecha DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        try:
-            cursor.execute("ALTER TABLE mensajes ADD COLUMN leido INTEGER DEFAULT 0")
-        except Exception:
-            pass
-            
-        conn.commit()
+    if not DATABASE_URL:
+        print("ADVERTENCIA: No se ha configurado DATABASE_URL.")
+        return
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id TEXT PRIMARY KEY,
+            nombre TEXT UNIQUE,
+            pass TEXT,
+            foto TEXT,
+            fondoChat TEXT,
+            tema TEXT DEFAULT 'dark',
+            brilloFondo INTEGER DEFAULT 100
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS contactos (
+            mi_id TEXT,
+            contacto_id TEXT,
+            PRIMARY KEY (mi_id, contacto_id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS grupos (
+            id TEXT PRIMARY KEY,
+            nombre TEXT,
+            foto TEXT,
+            creador_id TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS miembros_grupo (
+            grupo_id TEXT,
+            usuario_id TEXT,
+            aceptado INTEGER DEFAULT 0,
+            PRIMARY KEY (grupo_id, usuario_id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mensajes (
+            id SERIAL PRIMARY KEY,
+            clave_chat TEXT,
+            emisor TEXT,
+            receptor TEXT,
+            texto TEXT,
+            nombreEmisor TEXT,
+            fotoEmisor TEXT,
+            es_grupo INTEGER DEFAULT 0,
+            leido INTEGER DEFAULT 0,
+            fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
 
-init_db()
+if DATABASE_URL:
+    init_db()
 
 HTML_LAYOUT = """
 <!DOCTYPE html>
@@ -826,9 +830,9 @@ HTML_LAYOUT = """
 
             let avatarHtml = '';
             if(!esMio && contactoActivo.esGrupo) {
-                avatarHtml = msg.fotoEmisor 
-                    ? `<img src="${msg.fotoEmisor}" class="msg-avatar">`
-                    : `<div class="msg-avatar">${(msg.nombreEmisor || '?').charAt(0).toUpperCase()}</div>`;
+                avatarHtml = msg.fotoemisor || msg.fotoEmisor 
+                    ? `<img src="${msg.fotoemisor || msg.fotoEmisor}" class="msg-avatar">`
+                    : `<div class="msg-avatar">${(msg.nombreemisor || msg.nombreEmisor || '?').charAt(0).toUpperCase()}</div>`;
             }
 
             const msgElement = document.createElement('div');
@@ -836,7 +840,7 @@ HTML_LAYOUT = """
 
             let senderHeader = '';
             if(!esMio && contactoActivo.esGrupo) {
-                senderHeader = `<span class="sender-name">${msg.nombreEmisor || 'Usuario'}</span>`;
+                senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
             }
 
             msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}`;
@@ -873,7 +877,7 @@ HTML_LAYOUT = """
                 let prevText = data.texto;
                 if(prevText.startsWith('<img')) prevText = '📷 Foto adjunta';
                 else if(prevText.startsWith('📁 <a')) prevText = '📁 Archivo adjunto';
-                new Notification("Mensaje de " + data.nombreEmisor, { body: prevText });
+                new Notification("Mensaje de " + (data.nombreEmisor || data.nombreemisor), { body: prevText });
             }
         });
 
@@ -954,77 +958,88 @@ def conectar(data):
     from flask_socketio import join_room
     join_room(data['id'])
     
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = ?", (data['id'],))
-        for r in cursor.fetchall():
-            join_room(r['grupo_id'])
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = %s", (data['id'],))
+    for r in cursor.fetchall():
+        join_room(r['grupo_id'])
+    cursor.close()
+    conn.close()
 
 @socketio.on('registrar_usuario')
 def registrar(data):
     nombre = data['nombre']
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (nombre,))
-        row = cursor.fetchone()
-        
-        if row:
-            nuevo_id = row['id']
-            cursor.execute("UPDATE usuarios SET pass = ?, foto = ? WHERE id = ?", (data['pass'], data.get('foto'), nuevo_id))
-        else:
-            nuevo_id = str(random.randint(10000000, 99999999))
-            cursor.execute(
-                "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
-            )
-        conn.commit()
-        
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (nuevo_id,))
-        nuevo_usuario = dict(cursor.fetchone())
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM usuarios WHERE nombre = %s", (nombre,))
+    row = cursor.fetchone()
+    
+    if row:
+        nuevo_id = row['id']
+        cursor.execute("UPDATE usuarios SET pass = %s, foto = %s WHERE id = %s", (data['pass'], data.get('foto'), nuevo_id))
+    else:
+        nuevo_id = str(random.randint(10000000, 99999999))
+        cursor.execute(
+            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100)
+        )
+    conn.commit()
+    
+    cursor.execute("SELECT * FROM usuarios WHERE id = %s", (nuevo_id,))
+    nuevo_usuario = dict(cursor.fetchone())
+    cursor.close()
+    conn.close()
 
-        emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
+    emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
 
 @socketio.on('login_usuario')
 def login(data):
     nombre = data['nombre']
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE nombre = ?", (nombre,))
-        row = cursor.fetchone()
-        
-        if row and row['pass'] == data['pass']:
-            usuario = dict(row)
-            emit('auth_resultado', {'exito': True, 'usuario': usuario})
-        else:
-            emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM usuarios WHERE nombre = %s", (nombre,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if row and row['pass'] == data['pass']:
+        usuario = dict(row)
+        emit('auth_resultado', {'exito': True, 'usuario': usuario})
+    else:
+        emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
 
 @socketio.on('actualizar_perfil')
 def actualizar_perfil(data):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (data['id'],))
-        row = cursor.fetchone()
-        if not row:
-            emit('perfil_actualizado', {'exito': False, 'mensaje': 'Usuario no encontrado.'})
-            return
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
+    row = cursor.fetchone()
+    if not row:
+        cursor.close()
+        conn.close()
+        emit('perfil_actualizado', {'exito': False, 'mensaje': 'Usuario no encontrado.'})
+        return
 
-        nuevo_nombre = data['nombre']
-        nueva_pass = data['pass'] if data['pass'] else row['pass']
-        nueva_foto = data['foto']
-        nuevo_fondo = data.get('fondoChat')
-        nuevo_tema = data.get('tema', 'dark')
-        nuevo_brillo = data.get('brilloFondo', 100)
+    nuevo_nombre = data['nombre']
+    nueva_pass = data['pass'] if data['pass'] else row['pass']
+    nueva_foto = data['foto']
+    nuevo_fondo = data.get('fondoChat')
+    nuevo_tema = data.get('tema', 'dark')
+    nuevo_brillo = data.get('brilloFondo', 100)
 
-        cursor.execute("""
-            UPDATE usuarios 
-            SET nombre = ?, pass = ?, foto = ?, fondoChat = ?, tema = ?, brilloFondo = ? 
-            WHERE id = ?
-        """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
-        conn.commit()
+    cursor.execute("""
+        UPDATE usuarios 
+        SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s 
+        WHERE id = %s
+    """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, data['id']))
+    conn.commit()
 
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (data['id'],))
-        u_updated = dict(cursor.fetchone())
-        emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
+    cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
+    u_updated = dict(cursor.fetchone())
+    cursor.close()
+    conn.close()
+    
+    emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
 
 @socketio.on('crear_grupo')
 def crear_grupo(data):
@@ -1035,18 +1050,20 @@ def crear_grupo(data):
     creador_id = data['creador_id']
     miembros = list(set(data.get('miembros', [])))
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (?, ?, ?, ?)",
-                       (grupo_id, nombre, foto, creador_id))
-        
-        for m_id in miembros:
-            cursor.execute("SELECT id FROM usuarios WHERE id = ?", (m_id,))
-            if cursor.fetchone():
-                aceptado = 1 if m_id == creador_id else 0
-                cursor.execute("INSERT OR IGNORE INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (?, ?, ?)",
-                               (grupo_id, m_id, aceptado))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO grupos (id, nombre, foto, creador_id) VALUES (%s, %s, %s, %s)",
+                   (grupo_id, nombre, foto, creador_id))
+    
+    for m_id in miembros:
+        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (m_id,))
+        if cursor.fetchone():
+            aceptado = 1 if m_id == creador_id else 0
+            cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                           (grupo_id, m_id, aceptado))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
     join_room(grupo_id)
     emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
@@ -1054,16 +1071,17 @@ def crear_grupo(data):
 @socketio.on('obtener_detalles_grupo')
 def obtener_detalles_grupo(data):
     grupo_id = data['grupo_id']
-    miembros = []
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT u.id, u.nombre, u.foto 
-            FROM miembros_grupo mg 
-            JOIN usuarios u ON mg.usuario_id = u.id 
-            WHERE mg.grupo_id = ?
-        """, (grupo_id,))
-        miembros = [dict(r) for r in cursor.fetchall()]
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT u.id, u.nombre, u.foto 
+        FROM miembros_grupo mg 
+        JOIN usuarios u ON mg.usuario_id = u.id 
+        WHERE mg.grupo_id = %s
+    """, (grupo_id,))
+    miembros = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
+    conn.close()
     emit('detalles_grupo_cargados', {'miembros': miembros})
 
 @socketio.on('actualizar_grupo')
@@ -1071,33 +1089,39 @@ def actualizar_grupo(data):
     grupo_id = data['grupo_id']
     nombre = data['nombre']
     foto = data.get('foto')
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if foto:
-            cursor.execute("UPDATE grupos SET nombre = ?, foto = ? WHERE id = ?", (nombre, foto, grupo_id))
-        else:
-            cursor.execute("UPDATE grupos SET nombre = ? WHERE id = ?", (nombre, grupo_id))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    if foto:
+        cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s", (nombre, foto, grupo_id))
+    else:
+        cursor.execute("UPDATE grupos SET nombre = %s WHERE id = %s", (nombre, grupo_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
     emit('grupo_actualizado', {'exito': True})
 
 @socketio.on('aceptar_grupo')
 def aceptar_grupo(data):
     from flask_socketio import join_room
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = ? AND usuario_id = ?",
-                       (data['grupo_id'], data['usuario_id']))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE miembros_grupo SET aceptado = 1 WHERE grupo_id = %s AND usuario_id = %s",
+                   (data['grupo_id'], data['usuario_id']))
+    conn.commit()
+    cursor.close()
+    conn.close()
     join_room(data['grupo_id'])
     emit('grupo_aceptado', {'grupo_id': data['grupo_id']})
 
 @socketio.on('salir_grupo')
 def salir_grupo(data):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = ? AND usuario_id = ?",
-                       (data['grupo_id'], data['usuario_id']))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s",
+                   (data['grupo_id'], data['usuario_id']))
+    conn.commit()
+    cursor.close()
+    conn.close()
     obtener_contactos({'id': data['usuario_id']})
 
 @socketio.on('obtener_contactos')
@@ -1106,51 +1130,53 @@ def obtener_contactos(data):
     lista = []
     ids_agregados = set()
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT u.id, u.nombre, u.foto 
-            FROM contactos c 
-            JOIN usuarios u ON c.contacto_id = u.id 
-            WHERE c.mi_id = ?
-        """, (mi_id,))
-        for r in cursor.fetchall():
-            clave = "_".join(sorted([mi_id, r['id']]))
-            cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = ? AND emisor != ? AND leido = 0", (clave, mi_id))
-            unread = cursor.fetchone()['unread']
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread})
-            ids_agregados.add(r['id'])
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT u.id, u.nombre, u.foto 
+        FROM contactos c 
+        JOIN usuarios u ON c.contacto_id = u.id 
+        WHERE c.mi_id = %s
+    """, (mi_id,))
+    for r in cursor.fetchall():
+        clave = "_".join(sorted([mi_id, r['id']]))
+        cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave, mi_id))
+        unread = cursor.fetchone()['unread']
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread})
+        ids_agregados.add(r['id'])
 
-        cursor.execute("""
-            SELECT DISTINCT emisor, receptor 
-            FROM mensajes 
-            WHERE (emisor = ? OR receptor = ?) AND es_grupo = 0
-        """, (mi_id, mi_id))
-        
-        for r in cursor.fetchall():
-            otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
-            if otro_id not in ids_agregados:
-                cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ?", (otro_id,))
-                u = cursor.fetchone()
-                if u:
-                    clave = "_".join(sorted([mi_id, u['id']]))
-                    cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = ? AND emisor != ? AND leido = 0", (clave, mi_id))
-                    unread = cursor.fetchone()['unread']
-                    lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread})
-                    ids_agregados.add(u['id'])
+    cursor.execute("""
+        SELECT DISTINCT emisor, receptor 
+        FROM mensajes 
+        WHERE (emisor = %s OR receptor = %s) AND es_grupo = 0
+    """, (mi_id, mi_id))
+    
+    for r in cursor.fetchall():
+        otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
+        if otro_id not in ids_agregados:
+            cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = %s", (otro_id,))
+            u = cursor.fetchone()
+            if u:
+                clave = "_".join(sorted([mi_id, u['id']]))
+                cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave, mi_id))
+                unread = cursor.fetchone()['unread']
+                lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread})
+                ids_agregados.add(u['id'])
 
-        cursor.execute("""
-            SELECT g.id, g.nombre, g.foto, mg.aceptado 
-            FROM miembros_grupo mg 
-            JOIN grupos g ON mg.grupo_id = g.id 
-            WHERE mg.usuario_id = ?
-        """, (mi_id,))
-        for r in cursor.fetchall():
-            cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = ? AND emisor != ? AND leido = 0", (r['id'], mi_id))
-            unread = cursor.fetchone()['unread']
-            lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread})
+    cursor.execute("""
+        SELECT g.id, g.nombre, g.foto, mg.aceptado 
+        FROM miembros_grupo mg 
+        JOIN grupos g ON mg.grupo_id = g.id 
+        WHERE mg.usuario_id = %s
+    """, (mi_id,))
+    for r in cursor.fetchall():
+        cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = %s AND emisor != %s AND leido = 0", (r['id'], mi_id))
+        unread = cursor.fetchone()['unread']
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread})
 
+    cursor.close()
+    conn.close()
     emit('contactos_cargados', lista)
 
 @socketio.on('guardar_contacto')
@@ -1158,15 +1184,19 @@ def guardar_contacto(data):
     mi_id = data['mi_id']
     contacto_id = data['contacto_id']
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM usuarios WHERE id = ?", (contacto_id,))
-        if not cursor.fetchone():
-            emit('contacto_resultado', {'exito': False, 'mensaje': 'El ID introducido no existe.'})
-            return
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM usuarios WHERE id = %s", (contacto_id,))
+    if not cursor.fetchone():
+        cursor.close()
+        conn.close()
+        emit('contacto_resultado', {'exito': False, 'mensaje': 'El ID introducido no existe.'})
+        return
 
-        cursor.execute("INSERT OR IGNORE INTO contactos (mi_id, contacto_id) VALUES (?, ?)", (mi_id, contacto_id))
-        conn.commit()
+    cursor.execute("INSERT INTO contactos (mi_id, contacto_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (mi_id, contacto_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
     emit('contacto_resultado', {'exito': True, 'mensaje': 'Contacto añadido.'})
 
@@ -1177,11 +1207,13 @@ def eliminar_contacto(data):
 
     clave_chat = "_".join(sorted([mi_id, contacto_id]))
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM contactos WHERE mi_id = ? AND contacto_id = ?", (mi_id, contacto_id))
-        cursor.execute("DELETE FROM mensajes WHERE clave_chat = ? AND es_grupo = 0", (clave_chat,))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (mi_id, contacto_id))
+    cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 0", (clave_chat,))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
     obtener_contactos({'id': mi_id})
 
@@ -1191,13 +1223,15 @@ def cargar_historial(data):
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
     mi_id = data['emisor']
     
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = ? AND emisor != ?", (clave_chat, mi_id))
-        conn.commit()
-        
-        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = ? ORDER BY fecha ASC", (clave_chat,))
-        historial = [dict(r) for r in cursor.fetchall()]
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
+    conn.commit()
+    
+    cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+    historial = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
+    conn.close()
 
     emit('historial_cargado', historial)
     obtener_contactos({'id': mi_id})
@@ -1208,10 +1242,12 @@ def marcar_leido(data):
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
     mi_id = data['emisor']
     
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = ? AND emisor != ?", (clave_chat, mi_id))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
     obtener_contactos({'id': mi_id})
 
 @socketio.on('mensaje_enviado')
@@ -1219,13 +1255,15 @@ def manejar_mensaje(data):
     es_grupo = data.get('esGrupo', 0)
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
     
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-        """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+    """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
     nuevo_msg = {
         'clave_chat': clave_chat,
