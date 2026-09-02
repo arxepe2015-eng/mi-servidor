@@ -79,6 +79,16 @@ def init_db():
             fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_clave_chat ON mensajes (clave_chat)")
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chat_vaciado (
+            clave_chat TEXT,
+            usuario_id TEXT,
+            vaciado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (clave_chat, usuario_id)
+        )
+    ''')
     
     conn.commit()
     cursor.close()
@@ -258,22 +268,40 @@ HTML_LAYOUT = """
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarAjustesGrupo()">&times;</span>
             <h2>Opciones del Grupo</h2>
-            
-            <input type="text" id="editGroupName" placeholder="Nombre del grupo">
-            <label class="file-label">Cambiar foto del grupo:</label>
-            <input type="file" id="editGroupFoto" accept="image/*">
-            <button type="button" class="btn-action" onclick="guardarInfoGrupo()">Guardar Nombre/Foto</button>
-            
+
+            <div id="groupCreatorSection" style="display:none;">
+                <input type="text" id="editGroupName" placeholder="Nombre del grupo">
+                <label class="file-label">Cambiar foto del grupo:</label>
+                <input type="file" id="editGroupFoto" accept="image/*">
+                <button type="button" class="btn-action" onclick="guardarInfoGrupo()">Guardar Nombre/Foto</button>
+
+                <hr style="margin: 15px 0; border-color: var(--border-color);">
+                <label class="file-label" style="margin-top:0;">Añadir miembro (ID de 8 dígitos, o nombre si está en tus contactos):</label>
+                <input type="text" id="addMemberInput" placeholder="ID o nombre">
+                <button type="button" class="btn-action" onclick="confirmarAgregarMiembroGrupo()">Añadir al Grupo</button>
+            </div>
+
             <hr style="margin: 15px 0; border-color: var(--border-color);">
             <h3 style="font-size: 1rem; color: var(--accent); margin-bottom: 10px;">Miembros del Grupo</h3>
             <div id="groupMembersList"></div>
 
             <hr style="margin: 15px 0; border-color: var(--border-color);">
             <button type="button" class="btn-action btn-danger" onclick="eliminarChat()">Salir del Grupo</button>
+            <button type="button" class="btn-action btn-danger" id="btnEliminarGrupo" style="display:none;" onclick="eliminarGrupoCompleto()">Eliminar Grupo (para todos)</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="contactOptionsModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarOpcionesContacto()">&times;</span>
+            <h2>Opciones</h2>
+            <button type="button" class="btn-action" onclick="confirmarVaciarConversacion()">Vaciar conversación</button>
+            <button type="button" class="btn-action btn-danger" onclick="confirmarEliminarContacto()">Eliminar contacto</button>
         </div>
     </div>
 
     <div class="modal-overlay" id="settingsModal" style="display:none;">
+
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
             <h2>Ajustes de Perfil</h2>
@@ -353,7 +381,10 @@ HTML_LAYOUT = """
                 <button type="button" id="rotateHoldBtn" title="Mantén pulsado para rotar" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent); font-size:1.4rem; width:45px; height:45px; border-radius:50%; cursor:pointer; display:flex; justify-content:center; align-items:center; flex-shrink:0;">↻</button>
             </div>
 
-            <button type="button" class="btn-action" onclick="confirmarEdicionImagen()">Aplicar Cambios</button>
+            <div style="display:flex; gap:10px; margin-top:10px;">
+                <button type="button" class="btn-action" style="margin-top:0; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="resetearEditorImagen()">Restablecer</button>
+                <button type="button" class="btn-action" style="margin-top:0;" onclick="confirmarEdicionImagen()">Aplicar Cambios</button>
+            </div>
         </div>
     </div>
 
@@ -429,6 +460,24 @@ HTML_LAYOUT = """
         let editedFotoBase64 = null;
         let editedFondoBase64 = null;
         let cornerPoints = [];
+        // Recuadro de recorte del fondo de chat: rectangular (no cuadrado), porque el fondo
+        // cubre pantallas rectangulares, no un icono cuadrado como la foto de perfil.
+        const FONDO_RECT = { x: 15, y: 70, w: 270, h: 160 };
+
+        // En tablets que rotan de orientación, el ancho puede cruzar el punto de corte (768px)
+        // mientras hay un chat abierto. Sin este listener, la clase 'active-mobile' se queda
+        // desactualizada y la barra de envío deja de mostrarse hasta reabrir el chat.
+        function ajustarLayoutSegunAncho() {
+            if (!contactoActivo) return;
+            const chatArea = document.getElementById('chatArea');
+            if (window.innerWidth <= 768) {
+                chatArea.classList.add('active-mobile');
+            } else {
+                chatArea.classList.remove('active-mobile');
+            }
+        }
+        window.addEventListener('resize', ajustarLayoutSegunAncho);
+        window.addEventListener('orientationchange', ajustarLayoutSegunAncho);
 
         window.onload = () => {
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
@@ -660,15 +709,49 @@ HTML_LAYOUT = """
                 socket.emit('obtener_detalles_grupo', { grupo_id: contactoActivo.id });
                 document.getElementById('groupSettingsModal').style.display = 'flex';
             } else {
-                eliminarChat();
+                document.getElementById('contactOptionsModal').style.display = 'flex';
             }
         }
+
+        function cerrarOpcionesContacto() {
+            document.getElementById('contactOptionsModal').style.display = 'none';
+        }
+
+        function confirmarEliminarContacto() {
+            cerrarOpcionesContacto();
+            if(contactoActivo && confirm("¿Eliminar este contacto? Si te vuelve a escribir podrás seguir recibiendo sus mensajes, pero dejará de estar en tu lista de contactos.")) {
+                socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
+                document.getElementById('messages').innerHTML = '';
+                document.getElementById('activeChatContainer').style.display = 'none';
+                document.getElementById('emptyState').style.display = 'flex';
+                if(window.innerWidth <= 768) {
+                    document.getElementById('chatArea').classList.remove('active-mobile');
+                }
+                contactoActivo = null;
+            }
+        }
+
+        function confirmarVaciarConversacion() {
+            cerrarOpcionesContacto();
+            if(contactoActivo && confirm("¿Vaciar esta conversación? Se borrará solo de tu lado; si la otra persona también la vacía, se elimina para siempre.")) {
+                socket.emit('vaciar_conversacion', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
+                document.getElementById('messages').innerHTML = '';
+            }
+        }
+
+        socket.on('conversacion_vaciada', () => {
+            socket.emit('obtener_contactos', { id: miUsuario.id });
+        });
 
         function cerrarAjustesGrupo() {
             document.getElementById('groupSettingsModal').style.display = 'none';
         }
 
         socket.on('detalles_grupo_cargados', (data) => {
+            const esCreador = data.creador_id === miUsuario.id;
+            document.getElementById('groupCreatorSection').style.display = esCreador ? 'block' : 'none';
+            document.getElementById('btnEliminarGrupo').style.display = esCreador ? 'block' : 'none';
+
             const container = document.getElementById('groupMembersList');
             container.innerHTML = '';
             data.miembros.forEach(m => {
@@ -676,7 +759,7 @@ HTML_LAYOUT = """
                 item.className = 'member-item';
                 
                 const esYo = m.id === miUsuario.id;
-                const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}', '${m.nombre}')">Privado</button>`;
+                const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}', '${m.nombre}')">Chatear en privado</button>`;
                 
                 item.innerHTML = `
                     <div class="member-info">
@@ -705,6 +788,7 @@ HTML_LAYOUT = """
 
             socket.emit('actualizar_grupo', {
                 grupo_id: contactoActivo.id,
+                usuario_id: miUsuario.id,
                 nombre: nuevoNombre,
                 foto: nuevaFoto
             });
@@ -715,7 +799,57 @@ HTML_LAYOUT = """
                 alert("Grupo actualizado.");
                 cerrarAjustesGrupo();
                 socket.emit('obtener_contactos', { id: miUsuario.id });
+            } else {
+                alert(res.mensaje || "No se ha podido actualizar el grupo.");
             }
+        });
+
+        function confirmarAgregarMiembroGrupo() {
+            const idONombre = document.getElementById('addMemberInput').value.trim();
+            if(!idONombre || !contactoActivo) return;
+            socket.emit('agregar_miembro_grupo', {
+                grupo_id: contactoActivo.id,
+                usuario_id: miUsuario.id,
+                id_o_nombre: idONombre
+            });
+        }
+
+        socket.on('miembro_agregado_resultado', (res) => {
+            alert(res.mensaje || (res.exito ? "Miembro añadido." : "No se ha podido añadir."));
+            if(res.exito) {
+                document.getElementById('addMemberInput').value = '';
+            }
+        });
+
+        // El grupo ha cambiado (p.ej. me han añadido a uno nuevo): refresco mi lista.
+        socket.on('grupo_actualizado_para_ti', () => {
+            socket.emit('obtener_contactos', { id: miUsuario.id });
+        });
+
+        function eliminarGrupoCompleto() {
+            if(!contactoActivo) return;
+            if(confirm("¿Eliminar este grupo para todo el mundo? Esta acción no se puede deshacer.")) {
+                socket.emit('eliminar_grupo', { grupo_id: contactoActivo.id, usuario_id: miUsuario.id });
+            }
+        }
+
+        socket.on('grupo_eliminado_resultado', (res) => {
+            if(!res.exito) alert(res.mensaje || "No se ha podido eliminar el grupo.");
+        });
+
+        // Broadcast a todos los miembros cuando el creador borra el grupo.
+        socket.on('grupo_eliminado', (data) => {
+            if(contactoActivo && contactoActivo.esGrupo && contactoActivo.id === data.grupo_id) {
+                cerrarAjustesGrupo();
+                document.getElementById('messages').innerHTML = '';
+                document.getElementById('activeChatContainer').style.display = 'none';
+                document.getElementById('emptyState').style.display = 'flex';
+                if(window.innerWidth <= 768) {
+                    document.getElementById('chatArea').classList.remove('active-mobile');
+                }
+                contactoActivo = null;
+            }
+            socket.emit('obtener_contactos', { id: miUsuario.id });
         });
 
         function toggleColorInput(type) {
@@ -1002,7 +1136,7 @@ HTML_LAYOUT = """
             if (editorTargetType === 'foto') {
                 ctx.arc(150, 150, 110, 0, Math.PI * 2);
             } else {
-                ctx.rect(20, 20, 260, 260);
+                ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
             }
             ctx.fill();
             ctx.restore();
@@ -1015,7 +1149,7 @@ HTML_LAYOUT = """
             if (editorTargetType === 'foto') {
                 ctx.arc(150, 150, 110, 0, Math.PI * 2);
             } else {
-                ctx.rect(20, 20, 260, 260);
+                ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
             }
             ctx.stroke();
 
@@ -1046,18 +1180,30 @@ HTML_LAYOUT = """
             ctx.restore();
         }
 
+        function resetearEditorImagen() {
+            // Vuelve la posición/zoom/rotación al estado inicial (como cuando se cargó la imagen),
+            // sin cerrar el editor ni perder la imagen cargada.
+            imgX = 150;
+            imgY = 150;
+            imgScale = 1.0;
+            imgAngle = 0;
+            document.getElementById('editorZoomSlider').value = 1.0;
+            renderEditorCanvas();
+        }
+
         function confirmarEdicionImagen() {
             const offCanvas = document.createElement('canvas');
-            const size = editorTargetType === 'foto' ? 220 : 500;
-            offCanvas.width = size;
-            offCanvas.height = size;
             const ctx = offCanvas.getContext('2d');
 
             if (editorTargetType === 'foto') {
+                const size = 220;
+                offCanvas.width = size;
+                offCanvas.height = size;
+
                 ctx.beginPath();
                 ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
                 ctx.clip();
-                
+
                 const factor = size / 220; // relación del marco de 220px
                 const offsetX = (imgX - 40) * factor;
                 const offsetY = (imgY - 40) * factor;
@@ -1067,9 +1213,15 @@ HTML_LAYOUT = """
                 ctx.scale(imgScale * factor, imgScale * factor);
                 ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
             } else {
-                const factor = size / 260;
-                const offsetX = (imgX - 20) * factor;
-                const offsetY = (imgY - 20) * factor;
+                // Salida rectangular (misma proporción que FONDO_RECT), no cuadrada.
+                const outW = 960;
+                const factor = outW / FONDO_RECT.w;
+                const outH = Math.round(FONDO_RECT.h * factor);
+                offCanvas.width = outW;
+                offCanvas.height = outH;
+
+                const offsetX = (imgX - FONDO_RECT.x) * factor;
+                const offsetY = (imgY - FONDO_RECT.y) * factor;
 
                 ctx.translate(offsetX, offsetY);
                 ctx.rotate((imgAngle * Math.PI) / 180);
@@ -1197,18 +1349,16 @@ HTML_LAYOUT = """
         });
 
         function eliminarChat() {
-            if(contactoActivo && confirm(contactoActivo.esGrupo ? "¿Quieres salir de este grupo?" : "¿Quieres borrar este contacto y su conversación?")) {
-                if(contactoActivo.esGrupo) {
-                    socket.emit('salir_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
-                } else {
-                    socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
-                }
+            if(contactoActivo && contactoActivo.esGrupo && confirm("¿Quieres salir de este grupo?")) {
+                socket.emit('salir_grupo', { usuario_id: miUsuario.id, grupo_id: contactoActivo.id });
+                cerrarAjustesGrupo();
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
                 document.getElementById('emptyState').style.display = 'flex';
                 if(window.innerWidth <= 768) {
                     document.getElementById('chatArea').classList.remove('active-mobile');
                 }
+                contactoActivo = null;
             }
         }
 
@@ -1222,12 +1372,13 @@ HTML_LAYOUT = """
             });
         }
 
-        function renderizarMensaje(msg) {
+        function renderizarMensaje(msg, tempId) {
             const messagesDiv = document.getElementById('messages');
             const esMio = msg.emisor === miUsuario.id;
             
             const rowDiv = document.createElement('div');
             rowDiv.className = `msg-row ${esMio ? 'sent' : 'received'}`;
+            if (tempId) rowDiv.dataset.tempId = tempId;
 
             let avatarHtml = '';
             if(!esMio && contactoActivo.esGrupo) {
@@ -1265,6 +1416,14 @@ HTML_LAYOUT = """
                 (!contactoActivo.esGrupo && (data.emisor === contactoActivo.id || (data.emisor === miUsuario.id && data.receptor === contactoActivo.id)))
             );
 
+            // Si es el eco de un mensaje que yo mismo mandé, ya lo pinté al instante
+            // al pulsar "Enviar" (ver sendMessage). Si encontramos su fila por tempId,
+            // no lo volvemos a pintar para no duplicarlo.
+            if (data.emisor === miUsuario.id && data.tempId) {
+                const filaExistente = document.querySelector(`[data-temp-id="${data.tempId}"]`);
+                if (filaExistente) return;
+            }
+
             if (esDelChatActivo) {
                 renderizarMensaje(data);
                 if (data.emisor !== miUsuario.id) {
@@ -1286,14 +1445,22 @@ HTML_LAYOUT = """
             const input = document.getElementById('messageInput');
             const texto = input.value.trim();
             if (texto !== '' && contactoActivo) {
-                socket.emit('mensaje_enviado', {
+                const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                const msgOptimista = {
                     emisor: miUsuario.id,
                     nombreEmisor: miUsuario.nombre,
                     fotoEmisor: miUsuario.foto,
                     receptor: contactoActivo.id,
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
-                    texto: texto
-                });
+                    texto: texto,
+                    tempId: tempId
+                };
+
+                // Se pinta al instante en la propia pantalla; ya no se espera a que
+                // el mensaje complete el viaje de ida y vuelta al servidor para verlo.
+                renderizarMensaje(msgOptimista, tempId);
+
+                socket.emit('mensaje_enviado', msgOptimista);
                 input.value = '';
             }
         }
@@ -1331,14 +1498,18 @@ HTML_LAYOUT = """
 
         function enviarMensajeAdjunto(texto) {
             if (contactoActivo) {
-                socket.emit('mensaje_enviado', {
+                const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                const msgOptimista = {
                     emisor: miUsuario.id,
                     nombreEmisor: miUsuario.nombre,
                     fotoEmisor: miUsuario.foto,
                     receptor: contactoActivo.id,
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
-                    texto: texto
-                });
+                    texto: texto,
+                    tempId: tempId
+                };
+                renderizarMensaje(msgOptimista, tempId);
+                socket.emit('mensaje_enviado', msgOptimista);
             }
         }
 
@@ -1476,6 +1647,10 @@ def obtener_detalles_grupo(data):
     grupo_id = data['grupo_id']
     conn = get_db()
     cursor = conn.cursor()
+    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
+    grupo_row = cursor.fetchone()
+    creador_id = grupo_row['creador_id'] if grupo_row else None
+
     cursor.execute("""
         SELECT u.id, u.nombre, u.foto 
         FROM miembros_grupo mg 
@@ -1485,15 +1660,25 @@ def obtener_detalles_grupo(data):
     miembros = [dict(r) for r in cursor.fetchall()]
     cursor.close()
     conn.close()
-    emit('detalles_grupo_cargados', {'miembros': miembros})
+    emit('detalles_grupo_cargados', {'miembros': miembros, 'creador_id': creador_id})
 
 @socketio.on('actualizar_grupo')
 def actualizar_grupo(data):
     grupo_id = data['grupo_id']
     nombre = data['nombre']
     foto = data.get('foto')
+    usuario_id = data.get('usuario_id')
+
     conn = get_db()
     cursor = conn.cursor()
+    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
+    grupo_row = cursor.fetchone()
+    if not grupo_row or grupo_row['creador_id'] != usuario_id:
+        cursor.close()
+        conn.close()
+        emit('grupo_actualizado', {'exito': False, 'mensaje': 'Solo el creador del grupo puede cambiar el nombre o la foto.'})
+        return
+
     if foto:
         cursor.execute("UPDATE grupos SET nombre = %s, foto = %s WHERE id = %s", (nombre, foto, grupo_id))
     else:
@@ -1502,6 +1687,88 @@ def actualizar_grupo(data):
     cursor.close()
     conn.close()
     emit('grupo_actualizado', {'exito': True})
+
+@socketio.on('agregar_miembro_grupo')
+def agregar_miembro_grupo(data):
+    grupo_id = data['grupo_id']
+    usuario_id = data['usuario_id']  # quien hace la petición
+    id_o_nombre = data['id_o_nombre'].strip()
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
+    grupo_row = cursor.fetchone()
+    if not grupo_row or grupo_row['creador_id'] != usuario_id:
+        cursor.close()
+        conn.close()
+        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'Solo el creador del grupo puede añadir miembros.'})
+        return
+
+    # Se admite el ID de 8 dígitos directamente, o el nombre si esa persona está en mis contactos.
+    nuevo_id = None
+    if id_o_nombre.isdigit() and len(id_o_nombre) == 8:
+        cursor.execute("SELECT id FROM usuarios WHERE id = %s", (id_o_nombre,))
+        row = cursor.fetchone()
+        if row:
+            nuevo_id = row['id']
+    else:
+        cursor.execute("""
+            SELECT u.id FROM contactos c
+            JOIN usuarios u ON c.contacto_id = u.id
+            WHERE c.mi_id = %s AND u.nombre = %s
+        """, (usuario_id, id_o_nombre))
+        row = cursor.fetchone()
+        if row:
+            nuevo_id = row['id']
+
+    if not nuevo_id:
+        cursor.close()
+        conn.close()
+        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'No se ha encontrado a esa persona (usa su ID de 8 dígitos, o su nombre si está en tus contactos).'})
+        return
+
+    cursor.execute("SELECT usuario_id FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s", (grupo_id, nuevo_id))
+    if cursor.fetchone():
+        cursor.close()
+        conn.close()
+        emit('miembro_agregado_resultado', {'exito': False, 'mensaje': 'Esa persona ya está en el grupo.'})
+        return
+
+    cursor.execute("INSERT INTO miembros_grupo (grupo_id, usuario_id, aceptado) VALUES (%s, %s, 0)", (grupo_id, nuevo_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    emit('miembro_agregado_resultado', {'exito': True, 'mensaje': 'Miembro añadido.'})
+    obtener_detalles_grupo({'grupo_id': grupo_id})
+    # Avisa al nuevo miembro (si tiene sesión abierta) para que le aparezca el grupo con el banner de "Aceptar Grupo".
+    socketio.emit('grupo_actualizado_para_ti', {}, room=nuevo_id)
+
+@socketio.on('eliminar_grupo')
+def eliminar_grupo(data):
+    grupo_id = data['grupo_id']
+    usuario_id = data['usuario_id']
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT creador_id FROM grupos WHERE id = %s", (grupo_id,))
+    grupo_row = cursor.fetchone()
+    if not grupo_row or grupo_row['creador_id'] != usuario_id:
+        cursor.close()
+        conn.close()
+        emit('grupo_eliminado_resultado', {'exito': False, 'mensaje': 'Solo el creador del grupo puede eliminarlo.'})
+        return
+
+    cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s", (grupo_id,))
+    cursor.execute("DELETE FROM miembros_grupo WHERE grupo_id = %s", (grupo_id,))
+    cursor.execute("DELETE FROM grupos WHERE id = %s", (grupo_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    # Se elimina para todo el mundo: se avisa a todos los que tuvieran el grupo abierto.
+    socketio.emit('grupo_eliminado', {'grupo_id': grupo_id}, room=grupo_id)
+    emit('grupo_eliminado_resultado', {'exito': True})
 
 @socketio.on('aceptar_grupo')
 def aceptar_grupo(data):
@@ -1535,7 +1802,18 @@ def obtener_contactos(data):
 
     conn = get_db()
     cursor = conn.cursor()
-    
+
+    # Antes esto hacía 1 consulta extra POR CADA contacto/grupo para contar los no leídos
+    # (con 15-20 chats, eran 15-20 idas y vueltas a la base de datos = varios segundos).
+    # Ahora se calculan todos los no leídos en una sola consulta agrupada.
+    cursor.execute("""
+        SELECT clave_chat, COUNT(*) as unread
+        FROM mensajes
+        WHERE emisor != %s AND leido = 0
+        GROUP BY clave_chat
+    """, (mi_id,))
+    unread_por_clave = {r['clave_chat']: r['unread'] for r in cursor.fetchall()}
+
     cursor.execute("""
         SELECT u.id, u.nombre, u.foto 
         FROM contactos c 
@@ -1544,9 +1822,7 @@ def obtener_contactos(data):
     """, (mi_id,))
     for r in cursor.fetchall():
         clave = "_".join(sorted([mi_id, r['id']]))
-        cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave, mi_id))
-        unread = cursor.fetchone()['unread']
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread})
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0)})
         ids_agregados.add(r['id'])
 
     cursor.execute("""
@@ -1554,18 +1830,19 @@ def obtener_contactos(data):
         FROM mensajes 
         WHERE (emisor = %s OR receptor = %s) AND es_grupo = 0
     """, (mi_id, mi_id))
-    
+
+    otros_ids = set()
     for r in cursor.fetchall():
         otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
         if otro_id not in ids_agregados:
-            cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = %s", (otro_id,))
-            u = cursor.fetchone()
-            if u:
-                clave = "_".join(sorted([mi_id, u['id']]))
-                cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave, mi_id))
-                unread = cursor.fetchone()['unread']
-                lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread})
-                ids_agregados.add(u['id'])
+            otros_ids.add(otro_id)
+
+    if otros_ids:
+        cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ANY(%s)", (list(otros_ids),))
+        for u in cursor.fetchall():
+            clave = "_".join(sorted([mi_id, u['id']]))
+            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0)})
+            ids_agregados.add(u['id'])
 
     cursor.execute("""
         SELECT g.id, g.nombre, g.foto, mg.aceptado 
@@ -1574,9 +1851,7 @@ def obtener_contactos(data):
         WHERE mg.usuario_id = %s
     """, (mi_id,))
     for r in cursor.fetchall():
-        cursor.execute("SELECT COUNT(*) as unread FROM mensajes WHERE clave_chat = %s AND emisor != %s AND leido = 0", (r['id'], mi_id))
-        unread = cursor.fetchone()['unread']
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread})
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread_por_clave.get(r['id'], 0)})
 
     cursor.close()
     conn.close()
@@ -1608,17 +1883,48 @@ def eliminar_contacto(data):
     mi_id = data['mi_id']
     contacto_id = data['contacto_id']
 
-    clave_chat = "_".join(sorted([mi_id, contacto_id]))
-
+    # "Eliminar contacto" solo quita a la persona de tu lista. La conversación NO se borra:
+    # si te vuelve a escribir, seguirá llegando (aparecerá como chat no guardado, igual que
+    # cualquier conversación con alguien que no está en tus contactos).
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (mi_id, contacto_id))
-    cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s AND es_grupo = 0", (clave_chat,))
     conn.commit()
     cursor.close()
     conn.close()
 
     obtener_contactos({'id': mi_id})
+
+@socketio.on('vaciar_conversacion')
+def vaciar_conversacion(data):
+    mi_id = data['mi_id']
+    contacto_id = data['contacto_id']
+    clave_chat = "_".join(sorted([mi_id, contacto_id]))
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Marca la conversación como vaciada SOLO para mí (a partir de ahora ya no veo los mensajes
+    # anteriores). Para el otro usuario sigue intacta hasta que él también la vacíe.
+    cursor.execute("""
+        INSERT INTO chat_vaciado (clave_chat, usuario_id, vaciado_en)
+        VALUES (%s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (clave_chat, usuario_id) DO UPDATE SET vaciado_en = CURRENT_TIMESTAMP
+    """, (clave_chat, mi_id))
+
+    # Si ambas partes de la conversación ya la han vaciado, se borra de verdad para ahorrar espacio.
+    cursor.execute("SELECT usuario_id FROM chat_vaciado WHERE clave_chat = %s", (clave_chat,))
+    quienes_vaciaron = {r['usuario_id'] for r in cursor.fetchall()}
+    ambos_ids = set(clave_chat.split("_"))
+    if ambos_ids.issubset(quienes_vaciaron):
+        cursor.execute("DELETE FROM mensajes WHERE clave_chat = %s", (clave_chat,))
+        cursor.execute("DELETE FROM chat_vaciado WHERE clave_chat = %s", (clave_chat,))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    emit('conversacion_vaciada', {'contacto_id': contacto_id})
 
 @socketio.on('cargar_historial')
 def cargar_historial(data):
@@ -1630,8 +1936,22 @@ def cargar_historial(data):
     cursor = conn.cursor()
     cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
     conn.commit()
-    
-    cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+
+    if es_grupo:
+        cursor.execute("SELECT emisor, receptor, texto, nombreEmisor, fotoEmisor FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+    else:
+        # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
+        cursor.execute("""
+            SELECT m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor
+            FROM mensajes m
+            WHERE m.clave_chat = %s
+              AND m.fecha > COALESCE(
+                  (SELECT vaciado_en FROM chat_vaciado WHERE clave_chat = %s AND usuario_id = %s),
+                  '-infinity'::timestamp
+              )
+            ORDER BY m.fecha ASC
+        """, (clave_chat, clave_chat, mi_id))
+
     historial = [dict(r) for r in cursor.fetchall()]
     cursor.close()
     conn.close()
@@ -1675,7 +1995,8 @@ def manejar_mensaje(data):
         'texto': data['texto'],
         'nombreEmisor': data['nombreEmisor'],
         'fotoEmisor': data.get('fotoEmisor'),
-        'esGrupo': es_grupo
+        'esGrupo': es_grupo,
+        'tempId': data.get('tempId')
     }
 
     if es_grupo:
