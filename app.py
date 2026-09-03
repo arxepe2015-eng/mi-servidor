@@ -94,8 +94,14 @@ def enviar_push_a_usuario(usuario_id, payload):
                     ttl=60,
                     timeout=5,
                 )
+                endpoint_host = sub['endpoint'].split('/')[2] if '/' in sub['endpoint'] else sub['endpoint']
+                print(f'Push OK a usuario {usuario_id} via {endpoint_host}')
             except WebPushException as exc:
-                status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                response = getattr(exc, 'response', None)
+                status = getattr(response, 'status_code', None)
+                body = getattr(response, 'text', None)
+                endpoint_host = sub['endpoint'].split('/')[2] if '/' in sub['endpoint'] else sub['endpoint']
+                print(f'Push FALLO a usuario {usuario_id} via {endpoint_host}: status={status} body={body} exc={exc}')
                 if status in (404, 410):
                     expired_endpoints.append(sub['endpoint'])
 
