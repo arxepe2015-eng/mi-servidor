@@ -12,7 +12,7 @@ from pywebpush import webpush, WebPushException
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024, ping_interval=10, ping_timeout=8)
 
 usuarios_en_linea = {}
 sid_a_usuario = {}
@@ -2098,9 +2098,11 @@ def conectar(data):
 @socketio.on('disconnect')
 def desconectar():
     usuario_id = sid_a_usuario.pop(request.sid, None)
+    print(f'disconnect recibido, sid={request.sid}, usuario_id={usuario_id}', flush=True)
     if usuario_id is None:
         return
     usuarios_en_linea[usuario_id] = max(0, usuarios_en_linea.get(usuario_id, 1) - 1)
+    print(f'usuario {usuario_id} ahora tiene {usuarios_en_linea[usuario_id]} conexiones activas', flush=True)
     if usuarios_en_linea[usuario_id] == 0:
         conn = get_db()
         cursor = conn.cursor()
