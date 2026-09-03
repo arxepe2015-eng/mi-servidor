@@ -95,13 +95,13 @@ def enviar_push_a_usuario(usuario_id, payload):
                     timeout=5,
                 )
                 endpoint_host = sub['endpoint'].split('/')[2] if '/' in sub['endpoint'] else sub['endpoint']
-                print(f'Push OK a usuario {usuario_id} via {endpoint_host}')
+                print(f'Push OK a usuario {usuario_id} via {endpoint_host}', flush=True)
             except WebPushException as exc:
                 response = getattr(exc, 'response', None)
                 status = getattr(response, 'status_code', None)
                 body = getattr(response, 'text', None)
                 endpoint_host = sub['endpoint'].split('/')[2] if '/' in sub['endpoint'] else sub['endpoint']
-                print(f'Push FALLO a usuario {usuario_id} via {endpoint_host}: status={status} body={body} exc={exc}')
+                print(f'Push FALLO a usuario {usuario_id} via {endpoint_host}: status={status} body={body} exc={exc}', flush=True)
                 if status in (404, 410):
                     expired_endpoints.append(sub['endpoint'])
 
