@@ -2072,6 +2072,14 @@ def push_public_key():
 def healthz():
     return jsonify({'ok': True})
 
+@app.route('/debug/estado')
+def debug_estado():
+    return jsonify({
+        'usuarios_en_linea': usuarios_en_linea,
+        'sockets_activos': len(sid_a_usuario),
+        'sid_a_usuario': sid_a_usuario,
+    })
+
 @app.route('/')
 def home():
     return render_template_string(HTML_LAYOUT)
