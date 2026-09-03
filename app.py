@@ -955,6 +955,15 @@ HTML_LAYOUT = """
             
             socket.emit('conectar_usuario', { id: miUsuario.id });
             socket.emit('obtener_contactos', { id: miUsuario.id });
+
+            document.addEventListener('visibilitychange', () => {
+                if (!miUsuario) return;
+                if (document.hidden) {
+                    socket.emit('usuario_inactivo', { usuario_id: miUsuario.id });
+                } else {
+                    socket.emit('usuario_activo', { usuario_id: miUsuario.id });
+                }
+            });
         }
 
         function copiarMiID() {
@@ -2103,6 +2112,34 @@ def conectar(data):
     if estaba_desconectado:
         socketio.emit('estado_usuario', {'usuario_id': data['id'], 'en_linea': True, 'ultima_conexion': None})
 
+def _marcar_desconectado(usuario_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE usuarios SET ultima_conexion = NOW() WHERE id = %s", (usuario_id,))
+    conn.commit()
+    cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
+    fila = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
+    socketio.emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': False, 'ultima_conexion': ultima})
+
+@socketio.on('usuario_inactivo')
+def usuario_inactivo(data):
+    usuario_id = data['usuario_id']
+    usuario_a_sids.get(usuario_id, set()).discard(request.sid)
+    if not usuario_a_sids.get(usuario_id):
+        usuario_a_sids.pop(usuario_id, None)
+        _marcar_desconectado(usuario_id)
+
+@socketio.on('usuario_activo')
+def usuario_activo(data):
+    usuario_id = data['usuario_id']
+    estaba_desconectado = not usuario_a_sids.get(usuario_id)
+    usuario_a_sids.setdefault(usuario_id, set()).add(request.sid)
+    if estaba_desconectado:
+        socketio.emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': True, 'ultima_conexion': None})
+
 @socketio.on('disconnect')
 def desconectar():
     usuario_id = sid_a_usuario.pop(request.sid, None)
@@ -2114,16 +2151,7 @@ def desconectar():
     print(f'usuario {usuario_id} sigue_conectado={sigue_conectado} sids_restantes={usuario_a_sids.get(usuario_id)}', flush=True)
     if not sigue_conectado:
         usuario_a_sids.pop(usuario_id, None)
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE usuarios SET ultima_conexion = NOW() WHERE id = %s", (usuario_id,))
-        conn.commit()
-        cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
-        fila = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
-        socketio.emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': False, 'ultima_conexion': ultima})
+        _marcar_desconectado(usuario_id)
 
 @socketio.on('consultar_estado_usuario')
 def consultar_estado_usuario(data):
