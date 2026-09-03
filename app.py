@@ -362,6 +362,7 @@ HTML_LAYOUT = """
         .message-context-menu button.delete { color:#ea4335; font-weight:600; }
 
         .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
+        .mobile-back-btn { display: none; background: transparent; border: none; color: var(--text-main); font-size: 1.4rem; cursor: pointer; padding: 4px 10px 4px 0; align-items: center; }
         .attach-btn { background: var(--bg-input); border: none; color: var(--text-main); width: 42px; height: 42px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; flex-shrink: 0; }
         .attach-btn:hover { background: var(--border-color); }
         .chat-input-area input[type="text"] { flex: 1; padding: 12px; background: var(--bg-input); border: none; border-radius: 8px; color: var(--text-main); outline: none; font-size: 1rem; }
@@ -371,6 +372,7 @@ HTML_LAYOUT = """
             .sidebar { width: 100%; }
             .chat-area { display: none; }
             .chat-area.active-mobile { display: flex; position: fixed; top:0; left:0; width:100%; height:100%; z-index:500; }
+            .mobile-back-btn { display: inline-flex; }
         }
     </style>
 </head>
@@ -590,6 +592,7 @@ HTML_LAYOUT = """
             <div class="active-chat-container" id="activeChatContainer">
                 <div class="chat-header">
                     <div class="chat-header-user">
+                        <button type="button" class="mobile-back-btn" onclick="volverAlMenu()" title="Volver al menú" aria-label="Volver al menú">&#9776;</button>
                         <img id="activeAvatarImg" class="user-avatar" style="display:none;">
                         <div id="activeAvatarText" class="user-avatar">?</div>
                         <div>
@@ -660,6 +663,10 @@ HTML_LAYOUT = """
         }
         window.addEventListener('resize', ajustarLayoutSegunAncho);
         window.addEventListener('orientationchange', ajustarLayoutSegunAncho);
+
+        function volverAlMenu() {
+            document.getElementById('chatArea').classList.remove('active-mobile');
+        }
 
         function urlBase64ToUint8Array(base64String) {
             const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -1951,7 +1958,7 @@ self.addEventListener('push', (event) => {
     catch (e) { data = { title: 'Arxechat', body: event.data ? event.data.text() : 'Nuevo mensaje' }; }
     const options = {
         body: data.body || 'Tienes un mensaje nuevo',
-        icon: '/favicon.png',
+        icon: data.icon || '/favicon.png',
         badge: '/favicon.png',
         tag: data.tag || 'arxechat-message',
         renotify: true,
@@ -2650,11 +2657,16 @@ def manejar_mensaje(data):
     elif push_body.startswith('📁 <a'):
         push_body = '📁 Archivo adjunto'
 
+    push_icon = data.get('fotoEmisor')
+    if not push_icon or len(push_icon) > 3000:
+        push_icon = None
+
     push_payload = {
         'title': push_title,
         'body': push_body[:180],
         'url': '/',
         'tag': 'arxechat-' + str(clave_chat),
+        'icon': push_icon,
     }
     for recipient_id in set(push_recipients):
         socketio.start_background_task(enviar_push_a_usuario, recipient_id, push_payload)
