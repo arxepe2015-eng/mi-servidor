@@ -5,7 +5,7 @@ import base64
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
-from flask import Flask, render_template_string, jsonify, Response
+from flask import Flask, render_template_string, jsonify, Response, request
 from flask_socketio import SocketIO, emit
 from pywebpush import webpush, WebPushException
 
@@ -13,6 +13,9 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024)
+
+usuarios_en_linea = {}
+sid_a_usuario = {}
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '').strip()
@@ -151,6 +154,7 @@ def init_db():
     # Asegurar que existan las columnas nuevas si la tabla fue creada anteriormente
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_sent TEXT DEFAULT 'default'")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_recv TEXT DEFAULT 'default'")
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultima_conexion TIMESTAMP")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS contactos (
@@ -661,6 +665,26 @@ HTML_LAYOUT = """
                 chatArea.classList.remove('active-mobile');
             }
         }
+        function formatearUltimaConexion(iso) {
+            if (!iso) return 'Desconectado';
+            const fecha = new Date(iso);
+            const ahora = new Date();
+            const mismoDia = fecha.toDateString() === ahora.toDateString();
+            const hora = fecha.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            if (mismoDia) return 'Últ. vez hoy a las ' + hora;
+            const ayer = new Date(ahora);
+            ayer.setDate(ayer.getDate() - 1);
+            if (fecha.toDateString() === ayer.toDateString()) return 'Últ. vez ayer a las ' + hora;
+            const fechaTexto = fecha.toLocaleDateString();
+            return 'Últ. vez ' + fechaTexto + ' a las ' + hora;
+        }
+
+        socket.on('estado_usuario', (data) => {
+            if (contactoActivo && !contactoActivo.esGrupo && contactoActivo.id === data.usuario_id) {
+                document.getElementById('activeStatus').innerText = data.en_linea ? 'En línea' : formatearUltimaConexion(data.ultima_conexion);
+            }
+        });
+
         window.addEventListener('resize', ajustarLayoutSegunAncho);
         window.addEventListener('orientationchange', ajustarLayoutSegunAncho);
 
@@ -1631,7 +1655,12 @@ HTML_LAYOUT = """
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('activeChatContainer').style.display = 'flex';
             document.getElementById('activeName').innerText = c.nombre;
-            document.getElementById('activeStatus').innerText = c.esGrupo ? "Grupo de chat" : "En línea";
+            if (c.esGrupo) {
+                document.getElementById('activeStatus').innerText = "Grupo de chat";
+            } else {
+                document.getElementById('activeStatus').innerText = "...";
+                socket.emit('consultar_estado_usuario', { usuario_id: c.id });
+            }
             
             if(window.innerWidth <= 768) {
                 document.getElementById('chatArea').classList.add('active-mobile');
@@ -2051,7 +2080,7 @@ def home():
 def conectar(data):
     from flask_socketio import join_room
     join_room(data['id'])
-    
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT grupo_id FROM miembros_grupo WHERE usuario_id = %s", (data['id'],))
@@ -2059,6 +2088,45 @@ def conectar(data):
         join_room(r['grupo_id'])
     cursor.close()
     conn.close()
+
+    estaba_desconectado = usuarios_en_linea.get(data['id'], 0) == 0
+    usuarios_en_linea[data['id']] = usuarios_en_linea.get(data['id'], 0) + 1
+    sid_a_usuario[request.sid] = data['id']
+    if estaba_desconectado:
+        socketio.emit('estado_usuario', {'usuario_id': data['id'], 'en_linea': True, 'ultima_conexion': None})
+
+@socketio.on('disconnect')
+def desconectar():
+    usuario_id = sid_a_usuario.pop(request.sid, None)
+    if usuario_id is None:
+        return
+    usuarios_en_linea[usuario_id] = max(0, usuarios_en_linea.get(usuario_id, 1) - 1)
+    if usuarios_en_linea[usuario_id] == 0:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE usuarios SET ultima_conexion = NOW() WHERE id = %s", (usuario_id,))
+        conn.commit()
+        cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
+        fila = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
+        socketio.emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': False, 'ultima_conexion': ultima})
+
+@socketio.on('consultar_estado_usuario')
+def consultar_estado_usuario(data):
+    usuario_id = data['usuario_id']
+    en_linea = usuarios_en_linea.get(usuario_id, 0) > 0
+    ultima = None
+    if not en_linea:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
+        fila = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
+    emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': en_linea, 'ultima_conexion': ultima})
 
 @socketio.on('guardar_suscripcion_push')
 def guardar_suscripcion_push(data):
