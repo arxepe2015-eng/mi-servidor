@@ -14,7 +14,7 @@ app.config['SECRET_KEY'] = 'arxechat_clave_secreta_123'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10 * 1024 * 1024, ping_interval=10, ping_timeout=8)
 
-usuarios_en_linea = {}
+usuario_a_sids = {}
 sid_a_usuario = {}
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -2075,7 +2075,7 @@ def healthz():
 @app.route('/debug/estado')
 def debug_estado():
     return jsonify({
-        'usuarios_en_linea': usuarios_en_linea,
+        'usuario_a_sids': {k: list(v) for k, v in usuario_a_sids.items()},
         'sockets_activos': len(sid_a_usuario),
         'sid_a_usuario': sid_a_usuario,
     })
@@ -2097,8 +2097,8 @@ def conectar(data):
     cursor.close()
     conn.close()
 
-    estaba_desconectado = usuarios_en_linea.get(data['id'], 0) == 0
-    usuarios_en_linea[data['id']] = usuarios_en_linea.get(data['id'], 0) + 1
+    estaba_desconectado = not usuario_a_sids.get(data['id'])
+    usuario_a_sids.setdefault(data['id'], set()).add(request.sid)
     sid_a_usuario[request.sid] = data['id']
     if estaba_desconectado:
         socketio.emit('estado_usuario', {'usuario_id': data['id'], 'en_linea': True, 'ultima_conexion': None})
@@ -2109,9 +2109,11 @@ def desconectar():
     print(f'disconnect recibido, sid={request.sid}, usuario_id={usuario_id}', flush=True)
     if usuario_id is None:
         return
-    usuarios_en_linea[usuario_id] = max(0, usuarios_en_linea.get(usuario_id, 1) - 1)
-    print(f'usuario {usuario_id} ahora tiene {usuarios_en_linea[usuario_id]} conexiones activas', flush=True)
-    if usuarios_en_linea[usuario_id] == 0:
+    usuario_a_sids.get(usuario_id, set()).discard(request.sid)
+    sigue_conectado = bool(usuario_a_sids.get(usuario_id))
+    print(f'usuario {usuario_id} sigue_conectado={sigue_conectado} sids_restantes={usuario_a_sids.get(usuario_id)}', flush=True)
+    if not sigue_conectado:
+        usuario_a_sids.pop(usuario_id, None)
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute("UPDATE usuarios SET ultima_conexion = NOW() WHERE id = %s", (usuario_id,))
@@ -2126,7 +2128,7 @@ def desconectar():
 @socketio.on('consultar_estado_usuario')
 def consultar_estado_usuario(data):
     usuario_id = data['usuario_id']
-    en_linea = usuarios_en_linea.get(usuario_id, 0) > 0
+    en_linea = bool(usuario_a_sids.get(usuario_id))
     ultima = None
     if not en_linea:
         conn = get_db()
