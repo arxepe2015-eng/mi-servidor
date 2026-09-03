@@ -65,7 +65,9 @@ def usuario_publico(row):
     return u
 
 def enviar_push_a_usuario(usuario_id, payload):
+    print(f'enviar_push_a_usuario llamado para usuario {usuario_id}', flush=True)
     if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY or not VAPID_SUBJECT:
+        print(f'Push CANCELADO: faltan claves VAPID en el entorno (PUBLIC={bool(VAPID_PUBLIC_KEY)} PRIVATE={bool(VAPID_PRIVATE_KEY)} SUBJECT={bool(VAPID_SUBJECT)})', flush=True)
         return
 
     conn = None
