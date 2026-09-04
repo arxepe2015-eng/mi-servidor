@@ -30,7 +30,7 @@ ARXECHAT_LOGO_BYTES = base64.b64decode(ARXECHAT_LOGO_B64)
 
 DB_POOL = None
 if DATABASE_URL:
-    DB_POOL = ThreadedConnectionPool(1, 5, DATABASE_URL, cursor_factory=RealDictCursor, options='-c timezone=UTC')
+    DB_POOL = ThreadedConnectionPool(1, 20, DATABASE_URL, cursor_factory=RealDictCursor, options='-c timezone=UTC')
 
 class PooledConnection:
     def __init__(self, pool, conn):
