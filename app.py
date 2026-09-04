@@ -165,6 +165,14 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS contactos_ocultos (
+            mi_id TEXT,
+            contacto_id TEXT,
+            oculto_desde TIMESTAMP,
+            PRIMARY KEY (mi_id, contacto_id)
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS grupos (
             id TEXT PRIMARY KEY,
             nombre TEXT,
@@ -2513,16 +2521,25 @@ def obtener_contactos(data):
         ids_agregados.add(r['id'])
 
     cursor.execute("""
-        SELECT DISTINCT emisor, receptor 
-        FROM mensajes 
+        SELECT CASE WHEN emisor = %s THEN receptor ELSE emisor END AS otro_id, MAX(fecha) AS ultima_fecha
+        FROM mensajes
         WHERE (emisor = %s OR receptor = %s) AND es_grupo = 0
-    """, (mi_id, mi_id))
+        GROUP BY otro_id
+    """, (mi_id, mi_id, mi_id))
+    filas_msgs = cursor.fetchall()
+
+    cursor.execute("SELECT contacto_id, oculto_desde FROM contactos_ocultos WHERE mi_id = %s", (mi_id,))
+    ocultos = {r['contacto_id']: r['oculto_desde'] for r in cursor.fetchall()}
 
     otros_ids = set()
-    for r in cursor.fetchall():
-        otro_id = r['receptor'] if r['emisor'] == mi_id else r['emisor']
-        if otro_id not in ids_agregados:
-            otros_ids.add(otro_id)
+    for r in filas_msgs:
+        otro_id = r['otro_id']
+        if otro_id in ids_agregados:
+            continue
+        oculto_desde = ocultos.get(otro_id)
+        if oculto_desde and r['ultima_fecha'] and r['ultima_fecha'] <= oculto_desde:
+            continue
+        otros_ids.add(otro_id)
 
     if otros_ids:
         cursor.execute("SELECT id, nombre, foto FROM usuarios WHERE id = ANY(%s)", (list(otros_ids),))
@@ -2576,6 +2593,11 @@ def eliminar_contacto(data):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM contactos WHERE mi_id = %s AND contacto_id = %s", (mi_id, contacto_id))
+    cursor.execute("""
+        INSERT INTO contactos_ocultos (mi_id, contacto_id, oculto_desde)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (mi_id, contacto_id) DO UPDATE SET oculto_desde = NOW()
+    """, (mi_id, contacto_id))
     conn.commit()
     cursor.close()
     conn.close()
