@@ -65,6 +65,7 @@ def usuario_publico(row):
     u = dict(row)
     u['fondoChat'] = u.get('fondoChat', u.get('fondochat'))
     u['brilloFondo'] = u.get('brilloFondo', u.get('brillofondo', 100))
+    u.pop('ultima_conexion', None)
     return u
 
 def enviar_push_a_usuario(usuario_id, payload):
