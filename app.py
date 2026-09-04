@@ -2087,6 +2087,7 @@ def debug_estado():
         'usuario_a_sids': {k: list(v) for k, v in usuario_a_sids.items()},
         'sockets_activos': len(sid_a_usuario),
         'sid_a_usuario': sid_a_usuario,
+        'conexiones_bd_en_uso': len(getattr(DB_POOL, '_used', {})) if DB_POOL else None,
     })
 
 @app.route('/')
@@ -2114,13 +2115,15 @@ def conectar(data):
 
 def _marcar_desconectado(usuario_id):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE usuarios SET ultima_conexion = NOW() WHERE id = %s", (usuario_id,))
-    conn.commit()
-    cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
-    fila = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE usuarios SET ultima_conexion = NOW() WHERE id = %s", (usuario_id,))
+        conn.commit()
+        cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
+        fila = cursor.fetchone()
+        cursor.close()
+    finally:
+        conn.close()
     ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
     socketio.emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': False, 'ultima_conexion': ultima})
 
@@ -2160,11 +2163,13 @@ def consultar_estado_usuario(data):
     ultima = None
     if not en_linea:
         conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
-        fila = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ultima_conexion FROM usuarios WHERE id = %s", (usuario_id,))
+            fila = cursor.fetchone()
+            cursor.close()
+        finally:
+            conn.close()
         ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
     emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': en_linea, 'ultima_conexion': ultima})
 
