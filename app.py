@@ -625,6 +625,13 @@ HTML_LAYOUT = """
 
     <script>
         const socket = io();
+
+        window.addEventListener('error', (e) => {
+            alert('Error JS detectado: ' + e.message + ' (línea ' + e.lineno + ')');
+        });
+        socket.on('connect_error', (err) => {
+            alert('Error de conexión con el servidor: ' + err.message);
+        });
         let isRegister = false;
         let miUsuario = null;
         let contactoActivo = null;
@@ -892,6 +899,10 @@ HTML_LAYOUT = """
             
             if(!nombre || !pass) return alert("Rellena todos los campos");
 
+            if (!socket.connected) {
+                alert('Aviso: el socket no está conectado ahora mismo (socket.connected = false). Puede que el intento no llegue al servidor.');
+            }
+
             if(isRegister) {
                 const pass2 = document.getElementById('authPassConfirm').value;
                 if(pass !== pass2) {
@@ -916,7 +927,11 @@ HTML_LAYOUT = """
                 miUsuario = res.usuario;
                 localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
                 if(isRegister) alert("¡Cuenta creada! Tu ID es: " + miUsuario.id);
-                iniciarApp();
+                try {
+                    iniciarApp();
+                } catch (e) {
+                    alert('Fallo dentro de iniciarApp(): ' + e.message);
+                }
             } else {
                 alert(res.mensaje);
                 localStorage.removeItem('arxechat_sesion');
