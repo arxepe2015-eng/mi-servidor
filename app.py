@@ -206,6 +206,7 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_clave_fecha ON mensajes (clave_chat, fecha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_no_leidos ON mensajes (leido, clave_chat, emisor)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_receptor_leido ON mensajes (receptor, leido, clave_chat)")
+    cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS visto_en_pantalla BOOLEAN DEFAULT FALSE")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_contactos_mi_id ON contactos (mi_id, contacto_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_miembros_grupo_usuario ON miembros_grupo (usuario_id, grupo_id)")
 
@@ -697,14 +698,6 @@ HTML_LAYOUT = """
             const fechaTexto = fecha.toLocaleDateString();
             return 'Últ. vez ' + fechaTexto + ' a las ' + hora;
         }
-
-        socket.on('mensajes_leidos', (data) => {
-            if (contactoActivo && !contactoActivo.esGrupo && contactoActivo.id === data.otro_id) {
-                document.querySelectorAll('#messages .msg-row.sent .tick-leido').forEach(tick => {
-                    tick.classList.add('visto');
-                });
-            }
-        });
 
         socket.on('estado_usuario', (data) => {
             if (contactoActivo && !contactoActivo.esGrupo && contactoActivo.id === data.usuario_id) {
@@ -1884,7 +1877,7 @@ HTML_LAYOUT = """
                 : fechaObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             let tickHtml = '';
             if (esMio && !contactoActivo.esGrupo) {
-                const visto = (msg.leido === 1 || msg.leido === true) ? 'visto' : '';
+                const visto = (msg.visto_en_pantalla === true) ? 'visto' : '';
                 tickHtml = `<span class="tick-leido ${visto}">&#10003;</span>`;
             }
             msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}${tickHtml}</span>`;
@@ -1892,10 +1885,54 @@ HTML_LAYOUT = """
             rowDiv.innerHTML = avatarHtml;
             rowDiv.appendChild(msgElement);
             if (esMio && msg.id !== undefined && msg.id !== null) instalarEventosMensaje(rowDiv, msgElement, msg.id);
+            if (!esMio && !contactoActivo.esGrupo && msg.id !== undefined && msg.id !== null && msg.visto_en_pantalla !== true) {
+                observarVisibilidadMensaje(rowDiv, msg.id);
+            }
 
             messagesDiv.appendChild(rowDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
+
+        const observerMensajesVistos = new IntersectionObserver((entradas) => {
+            entradas.forEach(entrada => {
+                if (entrada.isIntersecting && document.visibilityState === 'visible') {
+                    const mensajeId = entrada.target.dataset.messageId;
+                    if (mensajeId) {
+                        socket.emit('marcar_mensaje_visto', { mensaje_id: parseInt(mensajeId, 10), lector_id: miUsuario.id });
+                        observerMensajesVistos.unobserve(entrada.target);
+                    }
+                }
+            });
+        }, { threshold: 0.6 });
+
+        function observarVisibilidadMensaje(elemento, mensajeId) {
+            observerMensajesVistos.observe(elemento);
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'visible') return;
+            // Al volver a la pestaña, revisamos qué mensajes ya están en pantalla
+            // (el observer no se dispara solo por cambiar de pestaña sin hacer scroll).
+            document.querySelectorAll('#messages .msg-row.received[data-message-id]').forEach(fila => {
+                const rect = fila.getBoundingClientRect();
+                const contenedor = document.getElementById('messages');
+                if (!contenedor) return;
+                const contRect = contenedor.getBoundingClientRect();
+                const visible = rect.top < contRect.bottom && rect.bottom > contRect.top;
+                if (visible) {
+                    socket.emit('marcar_mensaje_visto', { mensaje_id: parseInt(fila.dataset.messageId, 10), lector_id: miUsuario.id });
+                    observerMensajesVistos.unobserve(fila);
+                }
+            });
+        });
+
+        socket.on('mensaje_visto', (data) => {
+            const fila = document.querySelector(`#messages .msg-row.sent[data-message-id="${data.mensaje_id}"]`);
+            if (fila) {
+                const tick = fila.querySelector('.tick-leido');
+                if (tick) tick.classList.add('visto');
+            }
+        });
 
         socket.on('historial_cargado', (mensajes) => {
             const messagesDiv = document.getElementById('messages');
@@ -1928,9 +1965,6 @@ HTML_LAYOUT = """
 
             if (esDelChatActivo) {
                 renderizarMensaje(data);
-                if (data.emisor !== miUsuario.id) {
-                    socket.emit('marcar_leido', { emisor: miUsuario.id, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo });
-                }
             } else {
                 socket.emit('obtener_contactos', { id: miUsuario.id });
             }
@@ -2748,13 +2782,6 @@ def vaciar_grupo_permanentemente(data):
         cursor.close()
         conn.close()
 
-def _notificar_leido(clave_chat, lector_id, es_grupo, cursor):
-    if es_grupo:
-        return
-    cursor.execute("SELECT DISTINCT emisor FROM mensajes WHERE clave_chat = %s AND emisor != %s", (clave_chat, lector_id))
-    for r in cursor.fetchall():
-        socketio.emit('mensajes_leidos', {'otro_id': lector_id}, room=r['emisor'])
-
 @socketio.on('cargar_historial')
 def cargar_historial(data):
     es_grupo = data.get('esGrupo', False)
@@ -2764,15 +2791,14 @@ def cargar_historial(data):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave_chat, mi_id))
-    hubo_cambios = cursor.rowcount > 0
     conn.commit()
 
     if es_grupo:
-        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -2790,29 +2816,30 @@ def cargar_historial(data):
             item['fecha'] = fecha.isoformat() + ('Z' if fecha.tzinfo is None else '')
         historial.append(item)
 
-    if hubo_cambios:
-        _notificar_leido(clave_chat, mi_id, es_grupo, cursor)
-
     cursor.close()
     conn.close()
 
     emit('historial_cargado', historial)
 
-@socketio.on('marcar_leido')
-def marcar_leido(data):
-    es_grupo = data.get('esGrupo', False)
-    clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    mi_id = data['emisor']
-    
+@socketio.on('marcar_mensaje_visto')
+def marcar_mensaje_visto(data):
+    mensaje_id = data['mensaje_id']
+    lector_id = data['lector_id']
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave_chat, mi_id))
-    hubo_cambios = cursor.rowcount > 0
-    conn.commit()
-    if hubo_cambios:
-        _notificar_leido(clave_chat, mi_id, es_grupo, cursor)
-    cursor.close()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE mensajes SET visto_en_pantalla = TRUE
+            WHERE id = %s AND emisor != %s AND visto_en_pantalla = FALSE
+            RETURNING emisor
+        """, (mensaje_id, lector_id))
+        fila = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+    if fila:
+        socketio.emit('mensaje_visto', {'mensaje_id': mensaje_id}, room=fila['emisor'])
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
