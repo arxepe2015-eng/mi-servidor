@@ -547,6 +547,7 @@ HTML_LAYOUT = """
 
             <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
+            <button type="button" class="btn-action btn-danger" onclick="eliminarCuenta()">Eliminar Cuenta</button>
         </div>
     </div>
 
@@ -1624,6 +1625,19 @@ HTML_LAYOUT = """
             location.reload();
         }
 
+        function eliminarCuenta() {
+            if (!miUsuario) return;
+            if (confirm("¿Estás seguro de que quieres eliminar tu cuenta permanentemente?")) {
+                socket.emit('eliminar_cuenta', { id: miUsuario.id });
+            }
+        }
+
+        socket.on('cuenta_eliminada', () => {
+            localStorage.removeItem('arxechat_sesion');
+            alert('Tu cuenta ha sido eliminada.');
+            location.reload();
+        });
+
         socket.on('push_suscripcion_resultado', (res) => {
             if (res.exito) {
                 pushSubscriptionActiva = true;
@@ -2264,6 +2278,25 @@ def registrar(data):
     conn.close()
 
     emit('auth_resultado', {'exito': True, 'usuario': nuevo_usuario})
+
+@socketio.on('eliminar_cuenta')
+def eliminar_cuenta(data):
+    usuario_id = data['id']
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM contactos WHERE mi_id = %s OR contacto_id = %s", (usuario_id, usuario_id))
+        cursor.execute("DELETE FROM contactos_ocultos WHERE mi_id = %s OR contacto_id = %s", (usuario_id, usuario_id))
+        cursor.execute("DELETE FROM miembros_grupo WHERE usuario_id = %s", (usuario_id,))
+        cursor.execute("DELETE FROM push_subscriptions WHERE usuario_id = %s", (usuario_id,))
+        cursor.execute("DELETE FROM chat_vaciado WHERE usuario_id = %s", (usuario_id,))
+        cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+    usuario_a_sids.pop(usuario_id, None)
+    emit('cuenta_eliminada')
 
 @socketio.on('login_usuario')
 def login(data):
