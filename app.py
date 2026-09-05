@@ -363,6 +363,8 @@ HTML_LAYOUT = """
         
         .message { padding: 8px 12px 6px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); position: relative; width: 100%; }
         .message-time { float: right; margin: 4px 0 0 10px; font-size: 0.68rem; line-height: 1; color: var(--text-sub); white-space: nowrap; opacity: 0.95; user-select: none; }
+        .tick-leido { margin-left: 4px; opacity: 0; color: #34b7f1; font-weight: bold; transition: opacity 0.2s; }
+        .tick-leido.visto { opacity: 1; }
         .message.received { background: var(--msg-recv); border-top-left-radius: 0; }
         .message.sent { background: var(--msg-sent); border-top-right-radius: 0; }
         .message .sender-name { font-size: 0.75rem; font-weight: bold; color: var(--accent); margin-bottom: 3px; display: block; }
@@ -694,6 +696,14 @@ HTML_LAYOUT = """
             const fechaTexto = fecha.toLocaleDateString();
             return 'Últ. vez ' + fechaTexto + ' a las ' + hora;
         }
+
+        socket.on('mensajes_leidos', (data) => {
+            if (contactoActivo && !contactoActivo.esGrupo && contactoActivo.id === data.otro_id) {
+                document.querySelectorAll('#messages .msg-row.sent .tick-leido').forEach(tick => {
+                    tick.classList.add('visto');
+                });
+            }
+        });
 
         socket.on('estado_usuario', (data) => {
             if (contactoActivo && !contactoActivo.esGrupo && contactoActivo.id === data.usuario_id) {
@@ -1858,7 +1868,12 @@ HTML_LAYOUT = """
             const horaLocal = Number.isNaN(fechaObj.getTime())
                 ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                 : fechaObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}</span>`;
+            let tickHtml = '';
+            if (esMio && !contactoActivo.esGrupo) {
+                const visto = (msg.leido === 1 || msg.leido === true) ? 'visto' : '';
+                tickHtml = `<span class="tick-leido ${visto}">&#10003;</span>`;
+            }
+            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}${tickHtml}</span>`;
             
             rowDiv.innerHTML = avatarHtml;
             rowDiv.appendChild(msgElement);
@@ -2148,7 +2163,7 @@ def _marcar_desconectado(usuario_id):
         cursor.close()
     finally:
         conn.close()
-    ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
+    ultima = fila['ultima_conexion'].isoformat() + 'Z' if fila and fila['ultima_conexion'] else None
     socketio.emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': False, 'ultima_conexion': ultima})
 
 @socketio.on('usuario_inactivo')
@@ -2194,7 +2209,7 @@ def consultar_estado_usuario(data):
             cursor.close()
         finally:
             conn.close()
-        ultima = fila['ultima_conexion'].isoformat() if fila and fila['ultima_conexion'] else None
+        ultima = fila['ultima_conexion'].isoformat() + 'Z' if fila and fila['ultima_conexion'] else None
     emit('estado_usuario', {'usuario_id': usuario_id, 'en_linea': en_linea, 'ultima_conexion': ultima})
 
 @socketio.on('guardar_suscripcion_push')
@@ -2700,6 +2715,13 @@ def vaciar_grupo_permanentemente(data):
         cursor.close()
         conn.close()
 
+def _notificar_leido(clave_chat, lector_id, es_grupo, cursor):
+    if es_grupo:
+        return
+    cursor.execute("SELECT DISTINCT emisor FROM mensajes WHERE clave_chat = %s AND emisor != %s", (clave_chat, lector_id))
+    for r in cursor.fetchall():
+        socketio.emit('mensajes_leidos', {'otro_id': lector_id}, room=r['emisor'])
+
 @socketio.on('cargar_historial')
 def cargar_historial(data):
     es_grupo = data.get('esGrupo', False)
@@ -2708,15 +2730,16 @@ def cargar_historial(data):
     
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
+    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave_chat, mi_id))
+    hubo_cambios = cursor.rowcount > 0
     conn.commit()
 
     if es_grupo:
-        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -2733,6 +2756,10 @@ def cargar_historial(data):
             fecha = item['fecha']
             item['fecha'] = fecha.isoformat() + ('Z' if fecha.tzinfo is None else '')
         historial.append(item)
+
+    if hubo_cambios:
+        _notificar_leido(clave_chat, mi_id, es_grupo, cursor)
+
     cursor.close()
     conn.close()
 
@@ -2746,8 +2773,11 @@ def marcar_leido(data):
     
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s", (clave_chat, mi_id))
+    cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave_chat, mi_id))
+    hubo_cambios = cursor.rowcount > 0
     conn.commit()
+    if hubo_cambios:
+        _notificar_leido(clave_chat, mi_id, es_grupo, cursor)
     cursor.close()
     conn.close()
 
