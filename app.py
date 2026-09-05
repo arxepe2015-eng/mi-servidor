@@ -1105,7 +1105,10 @@ HTML_LAYOUT = """
             document.getElementById('groupSettingsModal').style.display = 'none';
         }
 
+        let ultimosMiembrosGrupo = [];
+
         socket.on('detalles_grupo_cargados', (data) => {
+            ultimosMiembrosGrupo = data.miembros || [];
             const esCreador = data.creador_id === miUsuario.id;
             document.getElementById('groupCreatorSection').style.display = esCreador ? 'block' : 'none';
             document.getElementById('btnEliminarGrupo').style.display = esCreador ? 'block' : 'none';
@@ -1117,7 +1120,7 @@ HTML_LAYOUT = """
                 item.className = 'member-item';
                 
                 const esYo = m.id === miUsuario.id;
-                const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}', '${m.nombre}')">Chatear en privado</button>`;
+                const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}')">Chatear en privado</button>`;
                 
                 item.innerHTML = `
                     <div class="member-info">
@@ -1129,10 +1132,13 @@ HTML_LAYOUT = """
             });
         });
 
-        function iniciarChatPrivado(id, nombre) {
+        function iniciarChatPrivado(id) {
+            const miembro = ultimosMiembrosGrupo.find(m => String(m.id) === String(id));
+            const nombre = miembro ? miembro.nombre : 'Usuario';
+            const foto = miembro ? (miembro.foto || null) : null;
             cerrarAjustesGrupo();
             socket.emit('guardar_contacto', { mi_id: miUsuario.id, contacto_id: id });
-            seleccionarContacto({ id: id, nombre: nombre, foto: null, esGuardado: true, esGrupo: false, sinLeer: 0 });
+            seleccionarContacto({ id: id, nombre: nombre, foto: foto, esGuardado: true, esGrupo: false, sinLeer: 0 });
         }
 
         async function guardarInfoGrupo() {
@@ -2562,9 +2568,7 @@ def salir_grupo(data):
     conn.close()
     obtener_contactos({'id': data['usuario_id']})
 
-@socketio.on('obtener_contactos')
-def obtener_contactos(data):
-    mi_id = data['id']
+def _construir_lista_contactos(mi_id):
     lista = []
     ids_agregados = set()
 
@@ -2641,7 +2645,12 @@ def obtener_contactos(data):
 
     cursor.close()
     conn.close()
-    emit('contactos_cargados', lista)
+    return lista
+
+@socketio.on('obtener_contactos')
+def obtener_contactos(data):
+    mi_id = data['id']
+    emit('contactos_cargados', _construir_lista_contactos(mi_id))
 
 @socketio.on('guardar_contacto')
 def guardar_contacto(data):
@@ -2791,6 +2800,7 @@ def cargar_historial(data):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE mensajes SET leido = 1 WHERE clave_chat = %s AND emisor != %s AND leido = 0", (clave_chat, mi_id))
+    hubo_cambios = cursor.rowcount > 0
     conn.commit()
 
     if es_grupo:
@@ -2820,6 +2830,8 @@ def cargar_historial(data):
     conn.close()
 
     emit('historial_cargado', historial)
+    if hubo_cambios:
+        socketio.emit('contactos_cargados', _construir_lista_contactos(mi_id), room=mi_id)
 
 @socketio.on('marcar_mensaje_visto')
 def marcar_mensaje_visto(data):
