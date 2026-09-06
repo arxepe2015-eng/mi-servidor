@@ -2177,12 +2177,28 @@ def healthz():
 
 @app.route('/debug/estado')
 def debug_estado():
+    suscripciones = []
+    if DATABASE_URL:
+        conn = get_db()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT usuario_id, COUNT(*) AS num_suscripciones,
+                       array_agg(split_part(split_part(endpoint, '//', 2), '/', 1)) AS servicios
+                FROM push_subscriptions
+                GROUP BY usuario_id
+            """)
+            suscripciones = [dict(r) for r in cursor.fetchall()]
+            cursor.close()
+        finally:
+            conn.close()
     return jsonify({
         'usuario_a_sids': {k: list(v) for k, v in usuario_a_sids.items()},
         'sockets_activos': len(sid_a_usuario),
         'sid_a_usuario': sid_a_usuario,
         'conexiones_bd_en_uso': len(getattr(DB_POOL, '_used', {})) if DB_POOL else None,
         'contador_eventos_presencia': contador_eventos_presencia,
+        'suscripciones_push_por_usuario': suscripciones,
     })
 
 @app.route('/')
