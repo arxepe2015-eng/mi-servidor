@@ -2227,6 +2227,7 @@ def _marcar_desconectado(usuario_id):
 def usuario_inactivo(data):
     contador_eventos_presencia['usuario_inactivo'] += 1
     usuario_id = data['usuario_id']
+    sid_a_usuario[request.sid] = usuario_id
     usuario_a_sids.get(usuario_id, set()).discard(request.sid)
     if not usuario_a_sids.get(usuario_id):
         usuario_a_sids.pop(usuario_id, None)
@@ -2236,6 +2237,7 @@ def usuario_inactivo(data):
 def usuario_activo(data):
     contador_eventos_presencia['usuario_activo'] += 1
     usuario_id = data['usuario_id']
+    sid_a_usuario[request.sid] = usuario_id
     estaba_desconectado = not usuario_a_sids.get(usuario_id)
     usuario_a_sids.setdefault(usuario_id, set()).add(request.sid)
     if estaba_desconectado:
