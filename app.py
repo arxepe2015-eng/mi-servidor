@@ -2,6 +2,7 @@ import os
 import random
 import json
 import base64
+import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -17,6 +18,16 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_h
 usuario_a_sids = {}
 sid_a_usuario = {}
 contador_eventos_presencia = {'usuario_inactivo': 0, 'usuario_activo': 0, 'conectar_usuario': 0, 'disconnect': 0}
+ultimos_intentos_push = []
+
+def _registrar_intento_push(usuario_id, resultado, detalle):
+    ultimos_intentos_push.append({
+        'hora': datetime.datetime.utcnow().isoformat() + 'Z',
+        'usuario_id': usuario_id,
+        'resultado': resultado,
+        'detalle': detalle,
+    })
+    del ultimos_intentos_push[:-30]
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '').strip()
@@ -73,6 +84,7 @@ def enviar_push_a_usuario(usuario_id, payload):
     print(f'enviar_push_a_usuario llamado para usuario {usuario_id}', flush=True)
     if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY or not VAPID_SUBJECT:
         print(f'Push CANCELADO: faltan claves VAPID en el entorno (PUBLIC={bool(VAPID_PUBLIC_KEY)} PRIVATE={bool(VAPID_PRIVATE_KEY)} SUBJECT={bool(VAPID_SUBJECT)})', flush=True)
+        _registrar_intento_push(usuario_id, 'CANCELADO', 'faltan claves VAPID')
         return
 
     conn = None
@@ -85,6 +97,9 @@ def enviar_push_a_usuario(usuario_id, payload):
         cursor.close()
         conn.close()
         conn = None
+
+        if not subscriptions:
+            _registrar_intento_push(usuario_id, 'SIN_SUSCRIPCION', 'no hay ninguna suscripcion guardada para este usuario')
 
         expired_endpoints = []
         for sub in subscriptions:
@@ -103,12 +118,14 @@ def enviar_push_a_usuario(usuario_id, payload):
                 )
                 endpoint_host = sub['endpoint'].split('/')[2] if '/' in sub['endpoint'] else sub['endpoint']
                 print(f'Push OK a usuario {usuario_id} via {endpoint_host}', flush=True)
+                _registrar_intento_push(usuario_id, 'OK', endpoint_host)
             except WebPushException as exc:
                 response = getattr(exc, 'response', None)
                 status = getattr(response, 'status_code', None)
                 body = getattr(response, 'text', None)
                 endpoint_host = sub['endpoint'].split('/')[2] if '/' in sub['endpoint'] else sub['endpoint']
                 print(f'Push FALLO a usuario {usuario_id} via {endpoint_host}: status={status} body={body} exc={exc}', flush=True)
+                _registrar_intento_push(usuario_id, 'FALLO', f'{endpoint_host} status={status} body={body}')
                 if status in (404, 410):
                     expired_endpoints.append(sub['endpoint'])
 
@@ -122,6 +139,7 @@ def enviar_push_a_usuario(usuario_id, payload):
             conn = None
     except Exception as exc:
         print(f'Error enviando push a {usuario_id}: {exc}')
+        _registrar_intento_push(usuario_id, 'ERROR_INESPERADO', str(exc))
         if conn:
             try:
                 conn.rollback()
@@ -2199,6 +2217,7 @@ def debug_estado():
         'conexiones_bd_en_uso': len(getattr(DB_POOL, '_used', {})) if DB_POOL else None,
         'contador_eventos_presencia': contador_eventos_presencia,
         'suscripciones_push_por_usuario': suscripciones,
+        'ultimos_intentos_push': ultimos_intentos_push,
     })
 
 @app.route('/')
