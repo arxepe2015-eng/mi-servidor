@@ -16,6 +16,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_h
 
 usuario_a_sids = {}
 sid_a_usuario = {}
+contador_eventos_presencia = {'usuario_inactivo': 0, 'usuario_activo': 0, 'conectar_usuario': 0, 'disconnect': 0}
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '').strip()
@@ -2181,6 +2182,7 @@ def debug_estado():
         'sockets_activos': len(sid_a_usuario),
         'sid_a_usuario': sid_a_usuario,
         'conexiones_bd_en_uso': len(getattr(DB_POOL, '_used', {})) if DB_POOL else None,
+        'contador_eventos_presencia': contador_eventos_presencia,
     })
 
 @app.route('/')
@@ -2203,6 +2205,7 @@ def conectar(data):
     estaba_desconectado = not usuario_a_sids.get(data['id'])
     usuario_a_sids.setdefault(data['id'], set()).add(request.sid)
     sid_a_usuario[request.sid] = data['id']
+    contador_eventos_presencia['conectar_usuario'] += 1
     if estaba_desconectado:
         socketio.emit('estado_usuario', {'usuario_id': data['id'], 'en_linea': True, 'ultima_conexion': None})
 
@@ -2222,6 +2225,7 @@ def _marcar_desconectado(usuario_id):
 
 @socketio.on('usuario_inactivo')
 def usuario_inactivo(data):
+    contador_eventos_presencia['usuario_inactivo'] += 1
     usuario_id = data['usuario_id']
     usuario_a_sids.get(usuario_id, set()).discard(request.sid)
     if not usuario_a_sids.get(usuario_id):
@@ -2230,6 +2234,7 @@ def usuario_inactivo(data):
 
 @socketio.on('usuario_activo')
 def usuario_activo(data):
+    contador_eventos_presencia['usuario_activo'] += 1
     usuario_id = data['usuario_id']
     estaba_desconectado = not usuario_a_sids.get(usuario_id)
     usuario_a_sids.setdefault(usuario_id, set()).add(request.sid)
@@ -2238,6 +2243,7 @@ def usuario_activo(data):
 
 @socketio.on('disconnect')
 def desconectar():
+    contador_eventos_presencia['disconnect'] += 1
     usuario_id = sid_a_usuario.pop(request.sid, None)
     print(f'disconnect recibido, sid={request.sid}, usuario_id={usuario_id}', flush=True)
     if usuario_id is None:
