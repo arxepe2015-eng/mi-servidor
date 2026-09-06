@@ -32,7 +32,15 @@ def _registrar_intento_push(usuario_id, resultado, detalle):
 DATABASE_URL = os.environ.get('DATABASE_URL')
 VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '').strip()
 VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '').strip()
-VAPID_SUBJECT = os.environ.get('VAPID_SUBJECT', 'mailto:admin@arxechat.local').strip()
+VAPID_SUBJECT = os.environ.get('VAPID_SUBJECT', 'https://arxechat.onrender.com').strip()
+if VAPID_SUBJECT and not VAPID_SUBJECT.startswith(('mailto:', 'http://', 'https://')):
+    # Apple (web.push.apple.com) rechaza el JWT con 403 BadJwtToken si 'sub' no es
+    # un mailto: o una URL válida y alcanzable de verdad (nada de dominios .local
+    # inventados), aunque Google/FCM lo acepte tal cual venga.
+    if '@' in VAPID_SUBJECT:
+        VAPID_SUBJECT = 'mailto:' + VAPID_SUBJECT
+    else:
+        VAPID_SUBJECT = 'https://arxechat.onrender.com'
 
 # Logo oficial de Arxechat (PNG optimizado 256x256), incrustado para que el
 # despliegue siga siendo de un solo archivo y el logo funcione en favicon, PWA,
