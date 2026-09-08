@@ -2913,9 +2913,9 @@ def marcar_mensaje_visto(data):
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE mensajes SET visto_en_pantalla = TRUE
+            UPDATE mensajes SET visto_en_pantalla = TRUE, leido = 1
             WHERE id = %s AND emisor != %s AND visto_en_pantalla = FALSE
-            RETURNING emisor
+            RETURNING emisor, leido
         """, (mensaje_id, lector_id))
         fila = cursor.fetchone()
         conn.commit()
@@ -2924,6 +2924,7 @@ def marcar_mensaje_visto(data):
         conn.close()
     if fila:
         socketio.emit('mensaje_visto', {'mensaje_id': mensaje_id}, room=fila['emisor'])
+        socketio.emit('contactos_cargados', _construir_lista_contactos(lector_id), room=lector_id)
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
