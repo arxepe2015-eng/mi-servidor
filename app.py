@@ -665,6 +665,27 @@ HTML_LAYOUT = """
 
     <script>
         const socket = io();
+        let esPrimeraConexion = true;
+
+        socket.on('connect', () => {
+            if (esPrimeraConexion) {
+                esPrimeraConexion = false;
+                return; // el primer login/carga ya hace todo esto en iniciarApp()
+            }
+            if (!miUsuario) return;
+            // La conexión se ha recuperado tras un corte (el servidor durmiéndose, un
+            // bache de red, etc). Como es una conexión nueva por debajo, el servidor ya
+            // no sabe que pertenecemos a nuestras salas de avisos: hay que re-suscribirse
+            // a todo, si no, no volveria a llegar nada en directo hasta recargar la página.
+            socket.emit('conectar_usuario', { id: miUsuario.id });
+            socket.emit('obtener_contactos', { id: miUsuario.id });
+            if (document.visibilityState === 'visible') {
+                socket.emit('usuario_activo', { usuario_id: miUsuario.id });
+            }
+            if (contactoActivo) {
+                socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo });
+            }
+        });
 
         window.addEventListener('error', (e) => {
             alert('Error JS detectado: ' + e.message + ' (línea ' + e.lineno + ')');
