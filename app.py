@@ -234,6 +234,9 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_no_leidos ON mensajes (leido, clave_chat, emisor)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_receptor_leido ON mensajes (receptor, leido, clave_chat)")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS visto_en_pantalla BOOLEAN DEFAULT FALSE")
+    cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_id INTEGER")
+    cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_texto TEXT")
+    cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_nombre TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_contactos_mi_id ON contactos (mi_id, contacto_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_miembros_grupo_usuario ON miembros_grupo (usuario_id, grupo_id)")
 
@@ -334,6 +337,8 @@ HTML_LAYOUT = """
         
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
+        .field-error { color: #ff5c5c; font-size: 0.82rem; text-align: left; margin: -6px 0 10px 2px; }
+        .input-error { border: 1px solid #ff5c5c !important; }
         .modal-box h2 { margin-bottom: 15px; color: var(--accent); }
         .modal-box input, .modal-box select { width: 100%; padding: 12px; margin: 8px 0; background: var(--bg-input); border: 1px solid transparent; border-radius: 6px; color: var(--text-main); outline: none; font-size: 1rem; }
         .file-label { display: block; text-align: left; font-size: 0.85rem; color: var(--text-sub); margin-top: 10px; }
@@ -405,6 +410,17 @@ HTML_LAYOUT = """
         .message-context-menu button.delete { color:#ea4335; font-weight:600; }
 
         .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
+        #replyPreviewBar { background: var(--bg-header); border-left: 3px solid var(--accent); padding: 8px 34px 8px 12px; margin: 0 16px; border-radius: 6px; position: relative; }
+        #replyPreviewBar .close-reply { position: absolute; right: 8px; top: 6px; cursor: pointer; font-size: 1.2rem; color: var(--text-sub); line-height: 1; }
+        .msg-row { position: relative; touch-action: pan-y; }
+        .msg-row.swiping { transition: none; }
+        .msg-row:not(.swiping) { transition: transform 0.15s ease-out; }
+        .msg-row .reply-icon { position: absolute; top: 50%; transform: translateY(-50%); opacity: 0; font-size: 1.1rem; pointer-events: none; }
+        .msg-row.sent .reply-icon { right: -28px; }
+        .msg-row.received .reply-icon { left: -28px; }
+        .quoted-reply { background: rgba(128,128,128,0.18); border-left: 3px solid var(--accent); border-radius: 6px; padding: 4px 8px; margin-bottom: 4px; font-size: 0.82rem; opacity: 0.9; max-width: 100%; overflow: hidden; }
+        .quoted-reply .quoted-sender { font-weight: bold; color: var(--accent); display: block; font-size: 0.8rem; }
+        .quoted-reply .quoted-texto { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
         .mobile-back-btn { display: none; background: transparent; border: none; color: var(--text-main); font-size: 1.4rem; cursor: pointer; padding: 4px 10px 4px 0; align-items: center; }
         .attach-btn { background: var(--bg-input); border: none; color: var(--text-main); width: 42px; height: 42px; border-radius: 50%; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center; flex-shrink: 0; }
         .attach-btn:hover { background: var(--border-color); }
@@ -525,7 +541,7 @@ HTML_LAYOUT = """
             </div>
             
             <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
-            <input type="password" id="editPass" placeholder="Nueva contraseña (opcional)">
+            <button type="button" class="btn-action" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirCambiarContrasena()">Cambiar contraseña</button>
             
             <label class="file-label">Tema visual:</label>
             <select id="editTheme">
@@ -537,6 +553,7 @@ HTML_LAYOUT = """
             <div style="display:flex; gap:8px; align-items:center;">
                 <input type="file" id="editFoto" accept="image/*" style="flex:1;">
                 <button type="button" class="btn-action" style="width:auto; margin-top:0; padding:10px 14px; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditorImagen('foto')">Editar</button>
+                <button type="button" class="btn-action btn-danger" style="width:auto; margin-top:0; padding:10px 14px;" onclick="eliminarImagenAjuste('foto')">Eliminar</button>
             </div>
             <div id="fotoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Foto editada lista para guardar</div>
 
@@ -544,6 +561,7 @@ HTML_LAYOUT = """
             <div style="display:flex; gap:8px; align-items:center;">
                 <input type="file" id="editFondoChat" accept="image/*" style="flex:1;">
                 <button type="button" class="btn-action" style="width:auto; margin-top:0; padding:10px 14px; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditorImagen('fondo')">Editar</button>
+                <button type="button" class="btn-action btn-danger" style="width:auto; margin-top:0; padding:10px 14px;" onclick="eliminarImagenAjuste('fondo')">Eliminar</button>
             </div>
             <div id="fondoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Fondo editado listo para guardar</div>
 
@@ -576,6 +594,19 @@ HTML_LAYOUT = """
             <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
             <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
             <button type="button" class="btn-action btn-danger" onclick="eliminarCuenta()">Eliminar Cuenta</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="changePasswordModal" style="display:none;">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarCambiarContrasena()">&times;</span>
+            <h2>Cambiar contraseña</h2>
+            <input type="password" id="cpOldPass" placeholder="Contraseña actual">
+            <div id="cpOldError" class="field-error" style="display:none;"></div>
+            <input type="password" id="cpNewPass1" placeholder="Contraseña nueva">
+            <input type="password" id="cpNewPass2" placeholder="Confirmar contraseña nueva">
+            <div id="cpNewError" class="field-error" style="display:none;"></div>
+            <button type="button" class="btn-action" onclick="intentarCambiarContrasena()">Cambiar contraseña</button>
         </div>
     </div>
 
@@ -653,6 +684,12 @@ HTML_LAYOUT = """
                     <div class="chat-messages" id="messages"></div>
                 </div>
 
+                <div id="replyPreviewBar" style="display:none;">
+                    <span class="close-reply" onclick="cancelarRespuesta()">&times;</span>
+                    <div id="replyPreviewNombre" style="font-weight:bold; color:var(--accent); font-size:0.85rem;"></div>
+                    <div id="replyPreviewTexto" style="font-size:0.85rem; color:var(--text-sub);"></div>
+                </div>
+
                 <div class="chat-input-area">
                     <button type="button" class="attach-btn" onclick="document.getElementById('fileAttachmentInput').click()" title="Adjuntar archivo">+</button>
                     <input type="file" id="fileAttachmentInput" style="display:none;" onchange="manejarAdjunto(this)">
@@ -696,6 +733,8 @@ HTML_LAYOUT = """
         let isRegister = false;
         let miUsuario = null;
         let contactoActivo = null;
+        let mensajeRespondiendo = null;
+        const cacheMensajes = {};
         let misContactos = [];
         let pushSubscriptionActiva = false;
         let pushRegistration = null;
@@ -716,6 +755,24 @@ HTML_LAYOUT = """
         let rotateInterval = null;
         let editedFotoBase64 = null;
         let editedFondoBase64 = null;
+        let fotoEliminada = false;
+        let fondoEliminado = false;
+
+        function eliminarImagenAjuste(tipo) {
+            if (tipo === 'foto') {
+                fotoEliminada = true;
+                editedFotoBase64 = null;
+                document.getElementById('editFoto').value = '';
+                document.getElementById('fotoEditedTag').style.display = 'block';
+                document.getElementById('fotoEditedTag').innerText = '✓ Foto marcada para eliminar (guarda para confirmar)';
+            } else {
+                fondoEliminado = true;
+                editedFondoBase64 = null;
+                document.getElementById('editFondoChat').value = '';
+                document.getElementById('fondoEditedTag').style.display = 'block';
+                document.getElementById('fondoEditedTag').innerText = '✓ Fondo marcado para eliminar (guarda para confirmar)';
+            }
+        }
         let cornerPoints = [];
         // Recuadro de recorte del fondo de chat: rectangular (no cuadrado), porque el fondo
         // cubre pantallas rectangulares, no un icono cuadrado como la foto de perfil.
@@ -1321,13 +1378,79 @@ HTML_LAYOUT = """
 
         function cerrarAjustes() { document.getElementById('settingsModal').style.display = 'none'; }
 
+        function abrirCambiarContrasena() {
+            document.getElementById('cpOldPass').value = '';
+            document.getElementById('cpNewPass1').value = '';
+            document.getElementById('cpNewPass2').value = '';
+            document.getElementById('cpOldPass').classList.remove('input-error');
+            document.getElementById('cpNewPass1').classList.remove('input-error');
+            document.getElementById('cpNewPass2').classList.remove('input-error');
+            document.getElementById('cpOldError').style.display = 'none';
+            document.getElementById('cpNewError').style.display = 'none';
+            document.getElementById('changePasswordModal').style.display = 'flex';
+        }
+
+        function cerrarCambiarContrasena() {
+            document.getElementById('changePasswordModal').style.display = 'none';
+        }
+
+        function intentarCambiarContrasena() {
+            const oldPass = document.getElementById('cpOldPass').value;
+            const newPass1 = document.getElementById('cpNewPass1').value;
+            const newPass2 = document.getElementById('cpNewPass2').value;
+
+            const oldInput = document.getElementById('cpOldPass');
+            const new1Input = document.getElementById('cpNewPass1');
+            const new2Input = document.getElementById('cpNewPass2');
+            const oldError = document.getElementById('cpOldError');
+            const newError = document.getElementById('cpNewError');
+
+            oldInput.classList.remove('input-error');
+            new1Input.classList.remove('input-error');
+            new2Input.classList.remove('input-error');
+            oldError.style.display = 'none';
+            newError.style.display = 'none';
+
+            // Primero se revisa la contraseña actual, antes que nada más.
+            if (oldPass !== miUsuario.pass) {
+                oldInput.classList.add('input-error');
+                oldError.innerText = 'La contraseña actual no es correcta.';
+                oldError.style.display = 'block';
+                return;
+            }
+
+            if (!newPass1 || newPass1 !== newPass2) {
+                new1Input.classList.add('input-error');
+                new2Input.classList.add('input-error');
+                newError.innerText = 'Las contraseñas nuevas no coinciden.';
+                newError.style.display = 'block';
+                return;
+            }
+
+            socket.emit('cambiar_contrasena', { id: miUsuario.id, actual: oldPass, nueva: newPass1 });
+        }
+
+        socket.on('contrasena_cambiada', (res) => {
+            if (res.exito) {
+                miUsuario.pass = res.nueva_pass;
+                localStorage.setItem('arxechat_sesion', JSON.stringify(miUsuario));
+                cerrarCambiarContrasena();
+                alert('Contraseña cambiada correctamente.');
+            } else {
+                const oldInput = document.getElementById('cpOldPass');
+                const oldError = document.getElementById('cpOldError');
+                oldInput.classList.add('input-error');
+                oldError.innerText = res.mensaje || 'No se ha podido cambiar la contraseña.';
+                oldError.style.display = 'block';
+            }
+        });
+
         async function guardarAjustes() {
             const btn = document.getElementById('btnGuardarAjustes');
             btn.innerText = "Guardando...";
             btn.disabled = true;
 
             const nuevoNombre = document.getElementById('editName').value.trim();
-            const nuevaPass = document.getElementById('editPass').value;
             const nuevoTema = document.getElementById('editTheme').value;
             const nuevoBrillo = parseInt(document.getElementById('editBrillo').value);
             
@@ -1345,7 +1468,9 @@ HTML_LAYOUT = """
             // Foto de perfil
             const fileFoto = document.getElementById('editFoto');
             let nuevaFoto = miUsuario.foto;
-            if (editedFotoBase64) {
+            if (fotoEliminada) {
+                nuevaFoto = null;
+            } else if (editedFotoBase64) {
                 nuevaFoto = editedFotoBase64;
             } else if (fileFoto.files.length > 0) {
                 nuevaFoto = await convertAndCompressBase64(fileFoto.files[0]);
@@ -1354,7 +1479,9 @@ HTML_LAYOUT = """
             // Fondo de chat
             const fileFondo = document.getElementById('editFondoChat');
             let nuevoFondo = miUsuario.fondoChat;
-            if (editedFondoBase64) {
+            if (fondoEliminado) {
+                nuevoFondo = null;
+            } else if (editedFondoBase64) {
                 nuevoFondo = editedFondoBase64;
             } else if (fileFondo.files.length > 0) {
                 nuevoFondo = await convertAndCompressBase64(fileFondo.files[0]);
@@ -1363,7 +1490,7 @@ HTML_LAYOUT = """
             socket.emit('actualizar_perfil', { 
                 id: miUsuario.id, 
                 nombre: nuevoNombre, 
-                pass: nuevaPass, 
+                pass: '', 
                 foto: nuevaFoto,
                 fondoChat: nuevoFondo,
                 tema: nuevoTema,
@@ -1900,6 +2027,13 @@ HTML_LAYOUT = """
             });
         }
 
+        function snippetDeMensaje(texto) {
+            if (!texto) return '';
+            if (texto.startsWith('<img')) return '📷 Foto';
+            if (texto.startsWith('📁 <a')) return '📁 Archivo adjunto';
+            return texto;
+        }
+
         function renderizarMensaje(msg, tempId) {
             const messagesDiv = document.getElementById('messages');
             const esMio = msg.emisor === miUsuario.id;
@@ -1907,7 +2041,10 @@ HTML_LAYOUT = """
             const rowDiv = document.createElement('div');
             rowDiv.className = `msg-row ${esMio ? 'sent' : 'received'}`;
             if (tempId) rowDiv.dataset.tempId = tempId;
-            if (msg.id !== undefined && msg.id !== null) rowDiv.dataset.messageId = String(msg.id);
+            if (msg.id !== undefined && msg.id !== null) {
+                rowDiv.dataset.messageId = String(msg.id);
+                cacheMensajes[msg.id] = msg;
+            }
 
             let avatarHtml = '';
             if(!esMio && contactoActivo.esGrupo) {
@@ -1924,6 +2061,13 @@ HTML_LAYOUT = """
                 senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
             }
 
+            const respondeATexto = msg.responde_a_texto;
+            const respondeANombre = msg.responde_a_nombre;
+            let quotedHtml = '';
+            if (respondeATexto || respondeANombre) {
+                quotedHtml = `<div class="quoted-reply"><span class="quoted-sender">${respondeANombre || 'Mensaje'}</span><span class="quoted-texto">${snippetDeMensaje(respondeATexto)}</span></div>`;
+            }
+
             const rawFecha = msg.fecha || new Date().toISOString();
             const fechaObj = new Date(rawFecha);
             const horaLocal = Number.isNaN(fechaObj.getTime())
@@ -1934,17 +2078,73 @@ HTML_LAYOUT = """
                 const visto = (msg.visto_en_pantalla === true) ? 'visto' : '';
                 tickHtml = `<span class="tick-leido ${visto}">&#10003;</span>`;
             }
-            msgElement.innerHTML = `${senderHeader}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}${tickHtml}</span>`;
+            msgElement.innerHTML = `${senderHeader}${quotedHtml}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}${tickHtml}</span>`;
             
-            rowDiv.innerHTML = avatarHtml;
+            rowDiv.innerHTML = avatarHtml + '<span class="reply-icon">↩️</span>';
             rowDiv.appendChild(msgElement);
             if (esMio && msg.id !== undefined && msg.id !== null) instalarEventosMensaje(rowDiv, msgElement, msg.id);
             if (!esMio && !contactoActivo.esGrupo && msg.id !== undefined && msg.id !== null && msg.visto_en_pantalla !== true) {
                 observarVisibilidadMensaje(rowDiv, msg.id);
             }
+            if (msg.id !== undefined && msg.id !== null) instalarSwipeResponder(rowDiv, msg.id);
 
             messagesDiv.appendChild(rowDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function instalarSwipeResponder(rowDiv, mensajeId) {
+            const UMBRAL = 60;
+            let startX = 0, deltaX = 0, arrastrando = false, mouseAbajo = false;
+
+            function onStart(x) {
+                startX = x;
+                arrastrando = true;
+                rowDiv.classList.add('swiping');
+            }
+            function onMove(x) {
+                if (!arrastrando) return;
+                deltaX = Math.max(-80, Math.min(80, x - startX));
+                rowDiv.style.transform = `translateX(${deltaX}px)`;
+                const icon = rowDiv.querySelector('.reply-icon');
+                if (icon) icon.style.opacity = Math.min(1, Math.abs(deltaX) / UMBRAL);
+            }
+            function onEnd() {
+                if (!arrastrando) return;
+                arrastrando = false;
+                rowDiv.classList.remove('swiping');
+                rowDiv.style.transform = '';
+                const icon = rowDiv.querySelector('.reply-icon');
+                if (icon) icon.style.opacity = 0;
+                if (Math.abs(deltaX) > UMBRAL) {
+                    iniciarRespuesta(mensajeId);
+                }
+                deltaX = 0;
+            }
+
+            rowDiv.addEventListener('touchstart', (e) => onStart(e.touches[0].clientX), { passive: true });
+            rowDiv.addEventListener('touchmove', (e) => onMove(e.touches[0].clientX), { passive: true });
+            rowDiv.addEventListener('touchend', onEnd, { passive: true });
+
+            rowDiv.addEventListener('mousedown', (e) => { mouseAbajo = true; onStart(e.clientX); });
+            window.addEventListener('mousemove', (e) => { if (mouseAbajo) onMove(e.clientX); });
+            window.addEventListener('mouseup', () => { if (mouseAbajo) { mouseAbajo = false; onEnd(); } });
+        }
+
+        function iniciarRespuesta(mensajeId) {
+            const msg = cacheMensajes[mensajeId];
+            if (!msg) return;
+            mensajeRespondiendo = msg;
+            const esMio = msg.emisor === miUsuario.id;
+            const nombre = esMio ? 'Tú' : (msg.nombreemisor || msg.nombreEmisor || (contactoActivo ? contactoActivo.nombre : 'Usuario'));
+            document.getElementById('replyPreviewNombre').innerText = 'Respondiendo a ' + nombre;
+            document.getElementById('replyPreviewTexto').innerText = snippetDeMensaje(msg.texto);
+            document.getElementById('replyPreviewBar').style.display = 'block';
+            document.getElementById('messageInput').focus();
+        }
+
+        function cancelarRespuesta() {
+            mensajeRespondiendo = null;
+            document.getElementById('replyPreviewBar').style.display = 'none';
         }
 
         const observerMensajesVistos = new IntersectionObserver((entradas) => {
@@ -2058,7 +2258,10 @@ HTML_LAYOUT = """
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto,
                     nombreGrupo: contactoActivo.esGrupo ? contactoActivo.nombre : undefined,
-                    tempId: tempId
+                    tempId: tempId,
+                    respondeAId: mensajeRespondiendo ? mensajeRespondiendo.id : null,
+                    respondeATexto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
+                    respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.emisor === miUsuario.id ? 'Tú' : (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor)) : null,
                 };
 
                 // Se pinta al instante en la propia pantalla; ya no se espera a que
@@ -2067,6 +2270,7 @@ HTML_LAYOUT = """
 
                 socket.emit('mensaje_enviado', msgOptimista);
                 input.value = '';
+                cancelarRespuesta();
             }
         }
 
@@ -2112,10 +2316,14 @@ HTML_LAYOUT = """
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto,
                     nombreGrupo: contactoActivo.esGrupo ? contactoActivo.nombre : undefined,
-                    tempId: tempId
+                    tempId: tempId,
+                    respondeAId: mensajeRespondiendo ? mensajeRespondiendo.id : null,
+                    respondeATexto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
+                    respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.emisor === miUsuario.id ? 'Tú' : (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor)) : null,
                 };
                 renderizarMensaje(msgOptimista, tempId);
                 socket.emit('mensaje_enviado', msgOptimista);
+                cancelarRespuesta();
             }
         }
 
@@ -2425,6 +2633,27 @@ def login(data):
         emit('auth_resultado', {'exito': True, 'usuario': usuario})
     else:
         emit('auth_resultado', {'exito': False, 'mensaje': 'Cuenta o contraseña incorrecta.'})
+
+@socketio.on('cambiar_contrasena')
+def cambiar_contrasena(data):
+    usuario_id = data['id']
+    actual = data['actual']
+    nueva = data['nueva']
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT pass FROM usuarios WHERE id = %s", (usuario_id,))
+        fila = cursor.fetchone()
+        if not fila or fila['pass'] != actual:
+            cursor.close()
+            emit('contrasena_cambiada', {'exito': False, 'mensaje': 'La contraseña actual no es correcta.'})
+            return
+        cursor.execute("UPDATE usuarios SET pass = %s WHERE id = %s", (nueva, usuario_id))
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+    emit('contrasena_cambiada', {'exito': True, 'nueva_pass': nueva})
 
 @socketio.on('actualizar_perfil')
 def actualizar_perfil(data):
@@ -2876,11 +3105,11 @@ def cargar_historial(data):
     conn.commit()
 
     if es_grupo:
-        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -2934,10 +3163,11 @@ def manejar_mensaje(data):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)
         RETURNING id, fecha
-    """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo))
+    """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo,
+          data.get('respondeAId'), data.get('respondeATexto'), data.get('respondeANombre')))
     saved = cursor.fetchone()
     conn.commit()
     cursor.close()
@@ -2953,7 +3183,10 @@ def manejar_mensaje(data):
         'fotoEmisor': data.get('fotoEmisor'),
         'esGrupo': es_grupo,
         'fecha': (saved['fecha'].isoformat() + ('Z' if saved['fecha'].tzinfo is None else '')) if saved['fecha'] else None,
-        'tempId': data.get('tempId')
+        'tempId': data.get('tempId'),
+        'responde_a_id': data.get('respondeAId'),
+        'responde_a_texto': data.get('respondeATexto'),
+        'responde_a_nombre': data.get('respondeANombre'),
     }
 
     if es_grupo:
