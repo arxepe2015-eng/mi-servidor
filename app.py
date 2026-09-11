@@ -237,6 +237,7 @@ def init_db():
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_id INTEGER")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_texto TEXT")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_nombre TEXT")
+    cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_emisor_id TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_contactos_mi_id ON contactos (mi_id, contacto_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_miembros_grupo_usuario ON miembros_grupo (usuario_id, grupo_id)")
 
@@ -2062,7 +2063,8 @@ HTML_LAYOUT = """
             }
 
             const respondeATexto = msg.responde_a_texto;
-            const respondeANombre = msg.responde_a_nombre;
+            const respondeAEmisorId = msg.responde_a_emisor_id;
+            const respondeANombre = respondeAEmisorId === miUsuario.id ? 'Tú' : msg.responde_a_nombre;
             let quotedHtml = '';
             if (respondeATexto || respondeANombre) {
                 quotedHtml = `<div class="quoted-reply"><span class="quoted-sender">${respondeANombre || 'Mensaje'}</span><span class="quoted-texto">${snippetDeMensaje(respondeATexto)}</span></div>`;
@@ -2261,7 +2263,8 @@ HTML_LAYOUT = """
                     tempId: tempId,
                     respondeAId: mensajeRespondiendo ? mensajeRespondiendo.id : null,
                     respondeATexto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
-                    respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.emisor === miUsuario.id ? 'Tú' : (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor)) : null,
+                    respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor) : null,
+                    respondeAEmisorId: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
                 };
 
                 // Se pinta al instante en la propia pantalla; ya no se espera a que
@@ -2319,7 +2322,8 @@ HTML_LAYOUT = """
                     tempId: tempId,
                     respondeAId: mensajeRespondiendo ? mensajeRespondiendo.id : null,
                     respondeATexto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
-                    respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.emisor === miUsuario.id ? 'Tú' : (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor)) : null,
+                    respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor) : null,
+                    respondeAEmisorId: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
                 };
                 renderizarMensaje(msgOptimista, tempId);
                 socket.emit('mensaje_enviado', msgOptimista);
@@ -3105,11 +3109,11 @@ def cargar_historial(data):
     conn.commit()
 
     if es_grupo:
-        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
+        cursor.execute("SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id FROM mensajes WHERE clave_chat = %s ORDER BY fecha ASC", (clave_chat,))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -3163,11 +3167,11 @@ def manejar_mensaje(data):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)
+        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
         RETURNING id, fecha
     """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo,
-          data.get('respondeAId'), data.get('respondeATexto'), data.get('respondeANombre')))
+          data.get('respondeAId'), data.get('respondeATexto'), data.get('respondeANombre'), data.get('respondeAEmisorId')))
     saved = cursor.fetchone()
     conn.commit()
     cursor.close()
@@ -3187,6 +3191,7 @@ def manejar_mensaje(data):
         'responde_a_id': data.get('respondeAId'),
         'responde_a_texto': data.get('respondeATexto'),
         'responde_a_nombre': data.get('respondeANombre'),
+        'responde_a_emisor_id': data.get('respondeAEmisorId'),
     }
 
     if es_grupo:
