@@ -2035,6 +2035,17 @@ HTML_LAYOUT = """
             return texto;
         }
 
+        function calificativoFechaMensaje(fechaObj) {
+            const ahora = new Date();
+            const inicioHoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate());
+            const inicioMsg = new Date(fechaObj.getFullYear(), fechaObj.getMonth(), fechaObj.getDate());
+            const diffDias = Math.round((inicioHoy - inicioMsg) / 86400000);
+            if (diffDias <= 0) return '';
+            if (diffDias === 1) return 'Ayer ';
+            if (diffDias === 2) return 'Anteayer ';
+            return fechaObj.toLocaleDateString() + ' ';
+        }
+
         function renderizarMensaje(msg, tempId) {
             const messagesDiv = document.getElementById('messages');
             const esMio = msg.emisor === miUsuario.id;
@@ -2062,9 +2073,10 @@ HTML_LAYOUT = """
                 senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
             }
 
-            const respondeATexto = msg.responde_a_texto;
-            const respondeAEmisorId = msg.responde_a_emisor_id;
-            const respondeANombre = respondeAEmisorId === miUsuario.id ? 'Tú' : msg.responde_a_nombre;
+            const respondeATexto = msg.responde_a_texto ?? msg.respondeATexto;
+            const respondeAEmisorId = msg.responde_a_emisor_id ?? msg.respondeAEmisorId;
+            const respondeANombreOriginal = msg.responde_a_nombre ?? msg.respondeANombre;
+            const respondeANombre = respondeAEmisorId === miUsuario.id ? 'Tú' : respondeANombreOriginal;
             let quotedHtml = '';
             if (respondeATexto || respondeANombre) {
                 quotedHtml = `<div class="quoted-reply"><span class="quoted-sender">${respondeANombre || 'Mensaje'}</span><span class="quoted-texto">${snippetDeMensaje(respondeATexto)}</span></div>`;
@@ -2072,9 +2084,8 @@ HTML_LAYOUT = """
 
             const rawFecha = msg.fecha || new Date().toISOString();
             const fechaObj = new Date(rawFecha);
-            const horaLocal = Number.isNaN(fechaObj.getTime())
-                ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                : fechaObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const fechaValida = !Number.isNaN(fechaObj.getTime()) ? fechaObj : new Date();
+            const horaLocal = calificativoFechaMensaje(fechaValida) + fechaValida.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             let tickHtml = '';
             if (esMio && !contactoActivo.esGrupo) {
                 const visto = (msg.visto_en_pantalla === true) ? 'visto' : '';
@@ -2265,6 +2276,12 @@ HTML_LAYOUT = """
                     respondeATexto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
                     respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor) : null,
                     respondeAEmisorId: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
+                    // Nombres en snake_case también, para que el pintado local instantáneo
+                    // (antes de que vuelva la confirmación del servidor) ya lo muestre bien.
+                    responde_a_id: mensajeRespondiendo ? mensajeRespondiendo.id : null,
+                    responde_a_texto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
+                    responde_a_nombre: mensajeRespondiendo ? (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor) : null,
+                    responde_a_emisor_id: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
                 };
 
                 // Se pinta al instante en la propia pantalla; ya no se espera a que
@@ -2324,6 +2341,12 @@ HTML_LAYOUT = """
                     respondeATexto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
                     respondeANombre: mensajeRespondiendo ? (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor) : null,
                     respondeAEmisorId: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
+                    // Nombres en snake_case también, para que el pintado local instantáneo
+                    // (antes de que vuelva la confirmación del servidor) ya lo muestre bien.
+                    responde_a_id: mensajeRespondiendo ? mensajeRespondiendo.id : null,
+                    responde_a_texto: mensajeRespondiendo ? mensajeRespondiendo.texto : null,
+                    responde_a_nombre: mensajeRespondiendo ? (mensajeRespondiendo.nombreemisor || mensajeRespondiendo.nombreEmisor) : null,
+                    responde_a_emisor_id: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
                 };
                 renderizarMensaje(msgOptimista, tempId);
                 socket.emit('mensaje_enviado', msgOptimista);
