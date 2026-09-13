@@ -360,7 +360,7 @@ HTML_LAYOUT = """
 
         .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
         
-        .sidebar { width: 350px; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
+        .sidebar { width: 350px; flex-shrink: 0; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
         .sidebar-header { background: var(--bg-header); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
         .user-info-btn { display: flex; align-items: center; gap: 10px; cursor: pointer; background: none; border: none; text-align: left; color: var(--text-main); }
         .user-avatar { width: 42px; height: 42px; border-radius: 50%; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 1.2rem; color: white; object-fit: cover; flex-shrink: 0; }
@@ -375,7 +375,7 @@ HTML_LAYOUT = """
         .contact-id { font-size: 0.8rem; color: var(--text-sub); }
         .unread-badge { background: var(--accent); color: white; border-radius: 50%; padding: 2px 8px; font-size: 0.75rem; font-weight: bold; margin-left: 8px; flex-shrink: 0; }
 
-        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; min-width: 0; }
         .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-sub); padding: 20px; }
         .empty-state h3 { color: var(--text-main); margin-bottom: 10px; font-size: 1.5rem; }
         
@@ -386,16 +386,18 @@ HTML_LAYOUT = """
         .chat-menu-btn { background: none; border: none; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
         
         .chat-messages-wrapper { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+        .drop-overlay { display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.55); color: #fff; font-size: 1.2rem; font-weight: bold; align-items: center; justify-content: center; z-index: 50; border: 3px dashed var(--accent); pointer-events: none; text-align: center; padding: 20px; }
+        .drop-overlay.activo { display: flex; }
         .chat-bg-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background-size: cover; background-position: center; z-index: 0; pointer-events: none; }
-        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1; }
+        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1; min-width: 0; }
         
-        .msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 75%; }
+        .msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 75%; min-width: 0; }
         .msg-row.sent { align-self: flex-end; flex-direction: row-reverse; }
         .msg-row.received { align-self: flex-start; }
         
         .msg-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #6b7c85; display: flex; justify-content: center; align-items: center; font-size: 0.75rem; color: white; font-weight: bold; }
         
-        .message { padding: 8px 12px 6px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; color: var(--text-main); position: relative; width: 100%; }
+        .message { padding: 8px 12px 6px 12px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-wrap: break-word; overflow-wrap: anywhere; color: var(--text-main); position: relative; width: 100%; min-width: 0; }
         .message-time { float: right; margin: 4px 0 0 10px; font-size: 0.68rem; line-height: 1; color: var(--text-sub); white-space: nowrap; opacity: 0.95; user-select: none; }
         .tick-leido { margin-left: 4px; opacity: 0; color: #34b7f1; font-weight: bold; transition: opacity 0.2s; }
         .tick-leido.visto { opacity: 1; }
@@ -680,9 +682,10 @@ HTML_LAYOUT = """
                     <button type="button" class="chat-menu-btn" onclick="abrirOpcionesMenu()" title="Opciones">&#8285;</button>
                 </div>
                 
-                <div class="chat-messages-wrapper">
+                <div class="chat-messages-wrapper" id="chatMessagesWrapper">
                     <div class="chat-bg-overlay" id="chatBgOverlay"></div>
                     <div class="chat-messages" id="messages"></div>
+                    <div class="drop-overlay" id="dropOverlay">Suelta el archivo para enviarlo</div>
                 </div>
 
                 <div id="replyPreviewBar" style="display:none;">
@@ -2160,6 +2163,34 @@ HTML_LAYOUT = """
             document.getElementById('replyPreviewBar').style.display = 'none';
         }
 
+        (function configurarArrastrarYSoltar() {
+            const zona = document.getElementById('chatMessagesWrapper');
+            const overlay = document.getElementById('dropOverlay');
+            let contadorDrag = 0;
+
+            zona.addEventListener('dragenter', (e) => {
+                e.preventDefault();
+                if (!contactoActivo) return;
+                contadorDrag++;
+                overlay.classList.add('activo');
+            });
+            zona.addEventListener('dragover', (e) => {
+                e.preventDefault();
+            });
+            zona.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                contadorDrag = Math.max(0, contadorDrag - 1);
+                if (contadorDrag === 0) overlay.classList.remove('activo');
+            });
+            zona.addEventListener('drop', async (e) => {
+                e.preventDefault();
+                contadorDrag = 0;
+                overlay.classList.remove('activo');
+                if (!contactoActivo || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+                await procesarArchivoAdjunto(e.dataTransfer.files[0]);
+            });
+        })();
+
         const observerMensajesVistos = new IntersectionObserver((entradas) => {
             entradas.forEach(entrada => {
                 if (entrada.isIntersecting && document.visibilityState === 'visible') {
@@ -2222,8 +2253,10 @@ HTML_LAYOUT = """
                     if (filaExistente.dataset.tempId === data.tempId) {
                         if (data.id !== undefined && data.id !== null) {
                             filaExistente.dataset.messageId = String(data.id);
+                            cacheMensajes[data.id] = data;
                             const msgEl = filaExistente.querySelector('.message');
                             if (msgEl) instalarEventosMensaje(filaExistente, msgEl, data.id);
+                            instalarSwipeResponder(filaExistente, data.id);
                         }
                         return;
                     }
@@ -2296,11 +2329,15 @@ HTML_LAYOUT = """
 
         async function manejarAdjunto(input) {
             if (!input.files || input.files.length === 0 || !contactoActivo) return;
-            const file = input.files[0];
-            
+            await procesarArchivoAdjunto(input.files[0]);
+            input.value = '';
+        }
+
+        async function procesarArchivoAdjunto(file) {
+            if (!file || !contactoActivo) return;
+
             if (file.size > 8 * 1024 * 1024) {
                 alert("El archivo supera el límite de 8 MB.");
-                input.value = '';
                 return;
             }
 
@@ -2309,6 +2346,7 @@ HTML_LAYOUT = """
             if (file.type.startsWith('image/')) {
                 const imgBase64 = await convertAndCompressBase64(file);
                 mensajeContenido = `<img src="${imgBase64}" style="max-width: 100%; border-radius: 8px; margin-top: 5px; display: block;">`;
+                enviarMensajeAdjunto(mensajeContenido);
             } else {
                 const reader = new FileReader();
                 reader.readAsDataURL(file);
@@ -2316,13 +2354,8 @@ HTML_LAYOUT = """
                     const base64Data = reader.result;
                     mensajeContenido = `📁 <a href="${base64Data}" download="${file.name}" style="color:var(--link-color); text-decoration:underline; font-weight:bold;">${file.name}</a>`;
                     enviarMensajeAdjunto(mensajeContenido);
-                    input.value = '';
                 };
-                return;
             }
-
-            enviarMensajeAdjunto(mensajeContenido);
-            input.value = '';
         }
 
         function enviarMensajeAdjunto(texto) {
@@ -2607,16 +2640,18 @@ def registrar(data):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM usuarios WHERE nombre = %s", (nombre,))
     row = cursor.fetchone()
-    
+
     if row:
-        nuevo_id = row['id']
-        cursor.execute("UPDATE usuarios SET pass = %s, foto = %s WHERE id = %s", (data['pass'], data.get('foto'), nuevo_id))
-    else:
-        nuevo_id = str(random.randint(10000000, 99999999))
-        cursor.execute(
-            "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100, 'default', 'default')
-        )
+        cursor.close()
+        conn.close()
+        emit('auth_resultado', {'exito': False, 'mensaje': 'Ese nombre de usuario ya está en uso.'})
+        return
+
+    nuevo_id = str(random.randint(10000000, 99999999))
+    cursor.execute(
+        "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100, 'default', 'default')
+    )
     conn.commit()
     
     cursor.execute("SELECT * FROM usuarios WHERE id = %s", (nuevo_id,))
@@ -2629,6 +2664,9 @@ def registrar(data):
 @socketio.on('eliminar_cuenta')
 def eliminar_cuenta(data):
     usuario_id = data['id']
+    if sid_a_usuario.get(request.sid) != usuario_id:
+        emit('auth_resultado', {'exito': False, 'mensaje': 'No autorizado.'})
+        return
     conn = get_db()
     try:
         cursor = conn.cursor()
@@ -2742,6 +2780,14 @@ def crear_grupo(data):
     conn.close()
 
     join_room(grupo_id)
+
+    for m_id in miembros:
+        if m_id == creador_id:
+            continue
+        for sid_miembro in usuario_a_sids.get(m_id, set()):
+            join_room(grupo_id, sid=sid_miembro)
+        socketio.emit('contactos_cargados', _construir_lista_contactos(m_id), room=m_id)
+
     emit('grupo_creado_resultado', {'exito': True, 'grupo_id': grupo_id})
 
 @socketio.on('obtener_detalles_grupo')
@@ -2792,6 +2838,7 @@ def actualizar_grupo(data):
 
 @socketio.on('agregar_miembro_grupo')
 def agregar_miembro_grupo(data):
+    from flask_socketio import join_room
     grupo_id = data['grupo_id']
     usuario_id = data['usuario_id']  # quien hace la petición
     id_o_nombre = data['id_o_nombre'].strip()
@@ -2843,6 +2890,8 @@ def agregar_miembro_grupo(data):
 
     emit('miembro_agregado_resultado', {'exito': True, 'mensaje': 'Miembro añadido.'})
     obtener_detalles_grupo({'grupo_id': grupo_id})
+    for sid_miembro in usuario_a_sids.get(nuevo_id, set()):
+        join_room(grupo_id, sid=sid_miembro)
     # Avisa al nuevo miembro (si tiene sesión abierta) para que le aparezca el grupo con el banner de "Aceptar Grupo".
     socketio.emit('grupo_actualizado_para_ti', {}, room=nuevo_id)
 
