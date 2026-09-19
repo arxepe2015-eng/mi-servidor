@@ -743,6 +743,7 @@ HTML_LAYOUT = """
         let mensajeRespondiendo = null;
         let mensajeEditandoId = null;
         const cacheMensajes = {};
+        const cacheFotosUsuario = {};
         let misContactos = [];
         let pushSubscriptionActiva = false;
         let pushRegistration = null;
@@ -1075,6 +1076,7 @@ HTML_LAYOUT = """
         function iniciarApp() {
             document.getElementById('authModal').style.display = 'none';
             document.getElementById('appContainer').style.display = 'flex';
+            if (miUsuario.foto) cacheFotosUsuario[miUsuario.id] = miUsuario.foto;
             
             document.getElementById('myName').innerText = miUsuario.nombre;
             document.getElementById('myID').innerText = "ID: " + miUsuario.id;
@@ -1222,6 +1224,7 @@ HTML_LAYOUT = """
 
         socket.on('detalles_grupo_cargados', (data) => {
             ultimosMiembrosGrupo = data.miembros || [];
+            ultimosMiembrosGrupo.forEach(m => { if (m.foto) cacheFotosUsuario[m.id] = m.foto; });
             const esCreador = data.creador_id === miUsuario.id;
             document.getElementById('groupCreatorSection').style.display = esCreador ? 'block' : 'none';
             document.getElementById('btnEliminarGrupo').style.display = esCreador ? 'block' : 'none';
@@ -1848,6 +1851,7 @@ HTML_LAYOUT = """
 
         socket.on('contactos_cargados', (lista) => {
             misContactos = lista;
+            lista.forEach(c => { if (c.foto) cacheFotosUsuario[c.id] = c.foto; });
             renderizarContactos();
         });
 
@@ -2069,8 +2073,9 @@ HTML_LAYOUT = """
 
             let avatarHtml = '';
             if(!esMio && contactoActivo.esGrupo) {
-                avatarHtml = msg.fotoemisor || msg.fotoEmisor 
-                    ? `<img src="${msg.fotoemisor || msg.fotoEmisor}" class="msg-avatar">`
+                const fotoAvatar = cacheFotosUsuario[msg.emisor];
+                avatarHtml = fotoAvatar
+                    ? `<img src="${fotoAvatar}" class="msg-avatar">`
                     : `<div class="msg-avatar">${(msg.nombreemisor || msg.nombreEmisor || '?').charAt(0).toUpperCase()}</div>`;
             }
 
@@ -2395,7 +2400,6 @@ HTML_LAYOUT = """
                 const msgOptimista = {
                     emisor: miUsuario.id,
                     nombreEmisor: miUsuario.nombre,
-                    fotoEmisor: miUsuario.foto,
                     receptor: contactoActivo.id,
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto,
@@ -2460,7 +2464,6 @@ HTML_LAYOUT = """
                 const msgOptimista = {
                     emisor: miUsuario.id,
                     nombreEmisor: miUsuario.nombre,
-                    fotoEmisor: miUsuario.foto,
                     receptor: contactoActivo.id,
                     esGrupo: contactoActivo.esGrupo ? 1 : 0,
                     texto: texto,
@@ -3325,13 +3328,13 @@ def cargar_historial(data):
 
     if es_grupo:
         cursor.execute("""
-            SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id
+            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id
             FROM mensajes WHERE clave_chat = %s ORDER BY fecha DESC LIMIT %s
         """, (clave_chat, LIMITE_HISTORIAL))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -3370,12 +3373,12 @@ def cargar_mas_historial(data):
     cursor = conn.cursor()
     if es_grupo:
         cursor.execute("""
-            SELECT id, emisor, receptor, texto, nombreEmisor, fotoEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id
+            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id
             FROM mensajes WHERE clave_chat = %s AND fecha < %s ORDER BY fecha DESC LIMIT %s
         """, (clave_chat, antes_de, LIMITE_HISTORIAL))
     else:
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fotoEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
             FROM mensajes m
             WHERE m.clave_chat = %s AND m.fecha < %s
               AND m.fecha > COALESCE(
@@ -3429,10 +3432,10 @@ def manejar_mensaje(data):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, fotoEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
+        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id)
+        VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
         RETURNING id, fecha
-    """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], data.get('fotoEmisor'), es_grupo,
+    """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], es_grupo,
           data.get('respondeAId'), data.get('respondeATexto'), data.get('respondeANombre'), data.get('respondeAEmisorId')))
     saved = cursor.fetchone()
     conn.commit()
@@ -3446,7 +3449,6 @@ def manejar_mensaje(data):
         'receptor': data['receptor'],
         'texto': data['texto'],
         'nombreEmisor': data['nombreEmisor'],
-        'fotoEmisor': data.get('fotoEmisor'),
         'esGrupo': es_grupo,
         'fecha': (saved['fecha'].isoformat() + ('Z' if saved['fecha'].tzinfo is None else '')) if saved['fecha'] else None,
         'tempId': data.get('tempId'),
@@ -3483,7 +3485,13 @@ def manejar_mensaje(data):
     elif push_body.startswith('📁 <a'):
         push_body = '📁 Archivo adjunto'
 
-    push_icon = data.get('fotoEmisor')
+    push_icon_conn = get_db()
+    push_icon_cursor = push_icon_conn.cursor()
+    push_icon_cursor.execute("SELECT foto FROM usuarios WHERE id = %s", (data['emisor'],))
+    fila_foto = push_icon_cursor.fetchone()
+    push_icon_cursor.close()
+    push_icon_conn.close()
+    push_icon = fila_foto['foto'] if fila_foto else None
     if not push_icon or len(push_icon) > 3000:
         push_icon = None
 
