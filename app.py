@@ -300,7 +300,7 @@ button.sec{background:#202c33;border:1px solid #00a884;color:#00a884}
 button.red{background:#ea4335}
 .row{display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid #2a3942}
 .row .n{flex:1;word-break:break-word}.row small{color:#8696a0}
-.ins{width:18px;height:18px;vertical-align:-3px}
+.ins{width:26px;height:26px;vertical-align:middle}
 #msg{margin:8px 0;color:#00a884;min-height:1.2em}
 </style></head><body><div class="box">
 <h2>Panel de insignias</h2>
@@ -347,7 +347,7 @@ function pintar(){
   var h='';
   usuarios.forEach(function(u){
     h+='<label class="row"><input type="checkbox" '+(sel[u.id]?'checked ':'')+'onchange="tog(\''+u.id+'\',this.checked,this)">'+
-       '<span class="n">'+esc(u.nombre)+(u.insignia?' <img class="ins" src="/insignia.png">':'')+'<br><small>ID: '+esc(u.id)+'</small></span></label>';
+       '<span class="n">'+esc(u.nombre)+(u.insignia?' <img class="ins" src="/insignia.png?v=2">':'')+'<br><small>ID: '+esc(u.id)+'</small></span></label>';
   });
   document.getElementById('lista').innerHTML=h||'<p style="color:#8696a0">Sin resultados.</p>';
   document.getElementById('contador').textContent=usuarios.length+' usuarios · '+nSel()+' seleccionados (máx. '+MAX+')';
@@ -446,7 +446,7 @@ HTML_LAYOUT = """
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
         body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
         
-        .badge-verif { width: 2.3em; height: 2.3em; vertical-align: middle; margin: -0.6em 0 -0.6em 2px; cursor: pointer; object-fit: contain; }
+        .badge-verif { width: 2.3em; height: 2.3em; vertical-align: middle; margin: 0 0 0 4px; cursor: pointer; object-fit: contain; }
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
         .field-error { color: #ff5c5c; font-size: 0.82rem; text-align: left; margin: -6px 0 10px 2px; }
@@ -576,7 +576,7 @@ HTML_LAYOUT = """
     <div class="modal-overlay" id="insigniaModal" style="display:none;" onclick="if(event.target===this)cerrarInsignia()">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarInsignia()">&times;</span>
-            <img src="/insignia.png" alt="Insignia" style="width:75%; max-width:300px; height:auto; margin: 10px auto 15px; display:block;">
+            <img src="/insignia.png?v=2" alt="Insignia" style="width:75%; max-width:300px; height:auto; margin: 10px auto 15px; display:block;">
             <h2 id="insigniaTitulo">Insignia de importancia</h2>
             <p id="insigniaTexto1" style="color: var(--text-main); font-size:1.05rem; margin-bottom:10px;">Esta insignia significa que la persona es importante.</p>
             <p id="insigniaTexto2" style="color: var(--text-sub); font-size:0.9rem; line-height:1.4;">Quien la lleva ha sido reconocido por Arxechat: es alguien con peso e influencia dentro de la comunidad, cuya identidad está respaldada y cuya palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.</p>
@@ -1981,7 +1981,7 @@ HTML_LAYOUT = """
 
         function htmlInsignia(c) {
             if (!c || c.esGrupo || !c.insignia) return '';
-            return ' <img src="/insignia.png" class="badge-verif" alt="Insignia" onclick="abrirInsignia(event)">';
+            return ' <img src="/insignia.png?v=2" class="badge-verif" alt="Insignia" onclick="abrirInsignia(event)">';
         }
         function abrirInsignia(ev, propia) {
             if (ev) { ev.stopPropagation(); ev.preventDefault(); }
@@ -1996,7 +1996,7 @@ HTML_LAYOUT = """
             const el = document.getElementById('myLogo');
             if (!el) return;
             if (miUsuario && miUsuario.insignia) {
-                el.src = '/insignia.png';
+                el.src = '/insignia.png?v=2';
                 el.style.borderRadius = '0';
                 el.style.objectFit = 'contain';
                 el.style.cursor = 'pointer';
