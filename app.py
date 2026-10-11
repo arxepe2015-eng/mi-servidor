@@ -579,7 +579,7 @@ HTML_LAYOUT = """
             <img src="/insignia.png?v=2" alt="Insignia" style="width:75%; max-width:300px; height:auto; margin: 10px auto 15px; display:block;">
             <h2 id="insigniaTitulo">Insignia de importancia</h2>
             <p id="insigniaTexto1" style="color: var(--text-main); font-size:1.05rem; margin-bottom:10px;">Esta insignia significa que la persona es importante.</p>
-            <p id="insigniaTexto2" style="color: var(--text-sub); font-size:0.9rem; line-height:1.4;">Quien la lleva ha sido reconocido por Arxechat: es alguien con peso e influencia dentro de la comunidad, cuya identidad está respaldada y cuya palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.</p>
+            <p id="insigniaTexto2" style="color: var(--text-sub); font-size:0.9rem; line-height:1.4;">Quien la lleva ha sido reconocido por Arxechat: es alguien imprtante dentro de la comunidad, cuya identidad está respaldada. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.</p>
         </div>
     </div>
 
@@ -1988,7 +1988,7 @@ HTML_LAYOUT = """
             document.getElementById('insigniaTitulo').innerText = propia ? 'Estás verificado' : 'Insignia de importancia';
             document.getElementById('insigniaTexto1').innerText = propia ? 'Esta insignia significa que estás verificado: eres una persona importante.' : 'Esta insignia significa que la persona es importante.';
             document.getElementById('insigniaTexto2').innerText = propia
-                ? 'Arxechat ha reconocido tu cuenta: tienes peso e influencia dentro de la comunidad, tu identidad está respaldada y tu palabra cuenta. Tu cuenta tiene un estatus especial, con poder para destacar sobre el resto.'
+                ? 'Arxechat ha reconocido tu cuenta: eres imprtante dentro de la comunidad, tu identidad está respaldada. Tu cuenta tiene un estatus especial, con poder para destacar sobre el resto.'
                 : 'Quien la lleva ha sido reconocido por Arxechat: es alguien con peso e influencia dentro de la comunidad, cuya identidad está respaldada y cuya palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.';
             document.getElementById('insigniaModal').style.display = 'flex';
         }
