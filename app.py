@@ -1989,7 +1989,7 @@ HTML_LAYOUT = """
             document.getElementById('insigniaTexto1').innerText = propia ? 'Esta insignia significa que estás verificado: eres una persona importante.' : 'Esta insignia significa que la persona es importante.';
             document.getElementById('insigniaTexto2').innerText = propia
                 ? 'Arxechat ha reconocido tu cuenta: eres imprtante dentro de la comunidad, tu identidad está respaldada. Tu cuenta tiene un estatus especial, con poder para destacar sobre el resto.'
-                : 'Quien la lleva ha sido reconocido por Arxechat: es alguien con peso e influencia dentro de la comunidad, cuya identidad está respaldada y cuya palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.';
+                : 'Quien la lleva ha sido reconocido por Arxechat: es alguien importante en la comunidad, cuya identidad está respaldada y su palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.';
             document.getElementById('insigniaModal').style.display = 'flex';
         }
         function actualizarLogoPropio() {
