@@ -446,6 +446,9 @@ HTML_LAYOUT = """
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
         body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
         
+        .compartir-fila { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid var(--border-color); cursor: pointer; text-align: left; }
+        .compartir-fila input { width: 20px; height: 20px; margin: 0; flex-shrink: 0; }
+        .compartir-fila .compartir-nombre { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .badge-verif { width: 2.3em; height: 2.3em; vertical-align: middle; margin: 0 0 0 4px; cursor: pointer; object-fit: contain; }
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
@@ -573,13 +576,24 @@ HTML_LAYOUT = """
         </div>
     </div>
 
+    <div class="modal-overlay" id="compartirModal" style="display:none;">
+        <div class="modal-box" style="text-align:left;">
+            <h2 style="text-align:center;">Compartir en Arxechat</h2>
+            <div id="compartirPreview" style="background: var(--bg-input); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 0.9rem; max-height: 140px; overflow-y: auto; word-break: break-word;"></div>
+            <input type="text" id="compartirFiltro" placeholder="Buscar chat o grupo" oninput="pintarListaCompartir()">
+            <div id="compartirLista" style="max-height: 38vh; overflow-y: auto; margin-top: 4px;"></div>
+            <button type="button" class="btn-action" id="compartirEnviarBtn" onclick="enviarCompartido()">Enviar</button>
+            <button type="button" class="btn-action" style="background: #202c33; border: 1px solid var(--accent); color: var(--accent);" onclick="cerrarCompartir()">Cancelar</button>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="insigniaModal" style="display:none;" onclick="if(event.target===this)cerrarInsignia()">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarInsignia()">&times;</span>
             <img src="/insignia.png?v=2" alt="Insignia" style="width:75%; max-width:300px; height:auto; margin: 10px auto 15px; display:block;">
             <h2 id="insigniaTitulo">Insignia de importancia</h2>
             <p id="insigniaTexto1" style="color: var(--text-main); font-size:1.05rem; margin-bottom:10px;">Esta insignia significa que la persona es importante.</p>
-            <p id="insigniaTexto2" style="color: var(--text-sub); font-size:0.9rem; line-height:1.4;">Quien la lleva ha sido reconocido por Arxechat: es alguien imprtante dentro de la comunidad, cuya identidad está respaldada. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.</p>
+            <p id="insigniaTexto2" style="color: var(--text-sub); font-size:0.9rem; line-height:1.4;">Quien la lleva ha sido reconocido por Arxechat: es alguien con peso e influencia dentro de la comunidad, cuya identidad está respaldada y cuya palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.</p>
         </div>
     </div>
 
@@ -1052,6 +1066,7 @@ HTML_LAYOUT = """
         }
 
         window.onload = () => {
+            leerCompartido();
             const sesionGuardada = localStorage.getItem('arxechat_sesion');
             if (sesionGuardada) {
                 // Entrada directa inmediata sin pantalla de login
@@ -1977,6 +1992,7 @@ HTML_LAYOUT = """
                 if (nuevo) { contactoActivo.insignia = !!nuevo.insignia; actualizarCabeceraNombre(); }
             }
             renderizarContactos();
+            if (compartidoPendiente && document.getElementById('compartirModal').style.display === 'none') mostrarCompartir();
         });
 
         function htmlInsignia(c) {
@@ -1988,8 +2004,8 @@ HTML_LAYOUT = """
             document.getElementById('insigniaTitulo').innerText = propia ? 'Estás verificado' : 'Insignia de importancia';
             document.getElementById('insigniaTexto1').innerText = propia ? 'Esta insignia significa que estás verificado: eres una persona importante.' : 'Esta insignia significa que la persona es importante.';
             document.getElementById('insigniaTexto2').innerText = propia
-                ? 'Arxechat ha reconocido tu cuenta: eres imprtante dentro de la comunidad, tu identidad está respaldada. Tu cuenta tiene un estatus especial, con poder para destacar sobre el resto.'
-                : 'Quien la lleva ha sido reconocido por Arxechat: es alguien importante en la comunidad, cuya identidad está respaldada y su palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.';
+                ? 'Arxechat ha reconocido tu cuenta: tienes peso e influencia dentro de la comunidad, tu identidad está respaldada y tu palabra cuenta. Tu cuenta tiene un estatus especial, con poder para destacar sobre el resto.'
+                : 'Quien la lleva ha sido reconocido por Arxechat: es alguien con peso e influencia dentro de la comunidad, cuya identidad está respaldada y cuya palabra cuenta. Es una cuenta con un estatus especial, con poder para destacar sobre el resto.';
             document.getElementById('insigniaModal').style.display = 'flex';
         }
         function actualizarLogoPropio() {
@@ -2597,6 +2613,203 @@ HTML_LAYOUT = """
             }
         }
 
+        // ===== Compartir desde el sistema hacia Arxechat (Web Share Target) =====
+        let compartidoPendiente = null;
+        let textoCompartido = '';
+        let compartirSeleccion = new Set();
+
+        function abrirDbShare() {
+            return new Promise((res, rej) => {
+                const r = indexedDB.open('arxechat-share', 1);
+                r.onupgradeneeded = () => r.result.createObjectStore('items');
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+            });
+        }
+
+        function escHtmlCompartir(t) {
+            return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        async function leerCompartido() {
+            try {
+                const p = new URLSearchParams(location.search);
+                const estado = p.get('compartido');
+                if (!estado) return;
+                history.replaceState(null, '', '/');
+                if (estado === 'error') {
+                    alert('No se ha podido recibir lo que querías compartir. Inténtalo de nuevo.');
+                    return;
+                }
+                const db = await abrirDbShare();
+                const item = await new Promise((res) => {
+                    const tx = db.transaction('items', 'readwrite');
+                    const st = tx.objectStore('items');
+                    const rq = st.get('pendiente');
+                    rq.onsuccess = () => { st.delete('pendiente'); res(rq.result || null); };
+                    rq.onerror = () => res(null);
+                });
+                db.close();
+                if (item && (item.texto || item.titulo || item.url || (item.archivos && item.archivos.length))) {
+                    compartidoPendiente = item;
+                    if (miUsuario && misContactos.length > 0) mostrarCompartir();
+                }
+            } catch (e) {}
+        }
+
+        function construirTextoCompartido(it) {
+            const partes = [];
+            const titulo = (it.titulo || '').trim();
+            const texto = (it.texto || '').trim();
+            const url = (it.url || '').trim();
+            if (titulo && titulo !== texto) partes.push(titulo);
+            if (texto) partes.push(texto);
+            if (url && texto.indexOf(url) === -1) partes.push(url);
+            return partes.join(String.fromCharCode(10));
+        }
+
+        function mostrarCompartir() {
+            if (!compartidoPendiente) return;
+            const it = compartidoPendiente;
+            textoCompartido = construirTextoCompartido(it);
+            const prev = document.getElementById('compartirPreview');
+            prev.innerHTML = '';
+            if (textoCompartido) {
+                const d = document.createElement('div');
+                d.textContent = textoCompartido.length > 300 ? textoCompartido.slice(0, 300) + '…' : textoCompartido;
+                prev.appendChild(d);
+            }
+            (it.archivos || []).forEach((f) => {
+                const d = document.createElement('div');
+                d.style.marginTop = '4px';
+                const esImg = (f.type || '').startsWith('image/');
+                if (esImg) {
+                    const im = document.createElement('img');
+                    im.src = URL.createObjectURL(f);
+                    im.style.cssText = 'max-height:70px; border-radius:6px; vertical-align:middle; margin-right:8px;';
+                    d.appendChild(im);
+                }
+                d.appendChild(document.createTextNode((esImg ? '' : '📁 ') + (f.name || 'archivo') + ' (' + Math.max(1, Math.round(f.size / 1024)) + ' KB)'));
+                prev.appendChild(d);
+            });
+            document.getElementById('compartirFiltro').value = '';
+            compartirSeleccion = new Set();
+            pintarListaCompartir();
+            document.getElementById('compartirModal').style.display = 'flex';
+        }
+
+        function pintarListaCompartir() {
+            const cont = document.getElementById('compartirLista');
+            const filtro = (document.getElementById('compartirFiltro').value || '').trim().toLowerCase();
+            cont.innerHTML = '';
+            misContactos.forEach((c) => {
+                if (c.esGrupo && !c.esGuardado) return;
+                if (filtro && String(c.nombre).toLowerCase().indexOf(filtro) === -1) return;
+                const fila = document.createElement('label');
+                fila.className = 'compartir-fila';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = compartirSeleccion.has(c.id);
+                cb.onchange = () => {
+                    if (cb.checked) compartirSeleccion.add(c.id); else compartirSeleccion.delete(c.id);
+                    actualizarBotonCompartir();
+                };
+                fila.appendChild(cb);
+                const foto = c.foto || cacheFotosUsuario[c.id];
+                if (foto) {
+                    const im = document.createElement('img');
+                    im.src = foto;
+                    im.className = 'user-avatar';
+                    fila.appendChild(im);
+                } else {
+                    const av = document.createElement('div');
+                    av.className = 'user-avatar';
+                    av.textContent = String(c.nombre).charAt(0).toUpperCase();
+                    fila.appendChild(av);
+                }
+                const nom = document.createElement('div');
+                nom.className = 'compartir-nombre';
+                nom.textContent = c.nombre + (c.esGrupo ? ' (Grupo)' : '');
+                fila.appendChild(nom);
+                cont.appendChild(fila);
+            });
+            if (!cont.children.length) cont.textContent = 'No hay chats que coincidan.';
+            actualizarBotonCompartir();
+        }
+
+        function actualizarBotonCompartir() {
+            const n = compartirSeleccion.size;
+            document.getElementById('compartirEnviarBtn').innerText = n > 0 ? 'Enviar (' + n + ')' : 'Enviar';
+        }
+
+        function cerrarCompartir() {
+            document.getElementById('compartirModal').style.display = 'none';
+            compartidoPendiente = null;
+            compartirSeleccion = new Set();
+        }
+
+        function leerComoDataUrl(file) {
+            return new Promise((res, rej) => {
+                const r = new FileReader();
+                r.onload = () => res(r.result);
+                r.onerror = () => rej(r.error);
+                r.readAsDataURL(file);
+            });
+        }
+
+        function enviarContenidoA(c, texto) {
+            const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+            const msg = {
+                emisor: miUsuario.id,
+                nombreEmisor: miUsuario.nombre,
+                receptor: c.id,
+                esGrupo: c.esGrupo ? 1 : 0,
+                texto: texto,
+                nombreGrupo: c.esGrupo ? c.nombre : undefined,
+                tempId: tempId
+            };
+            if (contactoActivo && contactoActivo.id === c.id) renderizarMensaje(msg, tempId);
+            socket.emit('mensaje_enviado', msg);
+        }
+
+        async function enviarCompartido() {
+            if (!compartidoPendiente) return;
+            if (compartirSeleccion.size === 0) { alert('Selecciona al menos un chat o grupo.'); return; }
+            const btn = document.getElementById('compartirEnviarBtn');
+            btn.disabled = true;
+            btn.innerText = 'Enviando...';
+            const it = compartidoPendiente;
+            const contenidos = [];
+            const rechazados = [];
+            if (textoCompartido) contenidos.push(escHtmlCompartir(textoCompartido));
+            for (const f of (it.archivos || [])) {
+                if (f.size > 8 * 1024 * 1024) { rechazados.push((f.name || 'archivo') + ' (más de 8 MB)'); continue; }
+                try {
+                    if ((f.type || '').startsWith('image/')) {
+                        const b64 = await convertAndCompressBase64(f);
+                        contenidos.push(`<img src="${b64}" style="max-width: 100%; border-radius: 8px; margin-top: 5px; display: block;">`);
+                    } else {
+                        const b64 = await leerComoDataUrl(f);
+                        const nombre = escHtmlCompartir(f.name || 'archivo');
+                        contenidos.push(`📁 <a href="${b64}" download="${nombre}" style="color:var(--link-color); text-decoration:underline; font-weight:bold;">${nombre}</a>`);
+                    }
+                } catch (e) {
+                    rechazados.push((f.name || 'archivo') + ' (no se pudo leer)');
+                }
+            }
+            const destinos = misContactos.filter((c) => compartirSeleccion.has(c.id));
+            if (contenidos.length > 0) {
+                for (const c of destinos) {
+                    for (const texto of contenidos) enviarContenidoA(c, texto);
+                }
+            }
+            btn.disabled = false;
+            actualizarBotonCompartir();
+            cerrarCompartir();
+            if (rechazados.length > 0) alert('No se han enviado: ' + rechazados.join(', '));
+            if (contenidos.length > 0 && destinos.length === 1) seleccionarContacto(destinos[0]);
+        }
+
         async function manejarAdjunto(input) {
             if (!input.files || input.files.length === 0 || !contactoActivo) return;
             await procesarArchivoAdjunto(input.files[0]);
@@ -2667,7 +2880,7 @@ HTML_LAYOUT = """
 @app.route('/service-worker.js')
 def service_worker():
     js = r"""
-const ARXECHAT_SW_VERSION = '2026-09-02-logo-push-v2';
+const ARXECHAT_SW_VERSION = '2026-10-13-compartir-v1';
 self.addEventListener('push', (event) => {
     let data = {};
     try { data = event.data ? event.data.json() : {}; }
@@ -2720,8 +2933,54 @@ self.addEventListener('pushsubscriptionchange', (event) => {
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
+function abrirDbShare() {
+    return new Promise((res, rej) => {
+        const r = indexedDB.open('arxechat-share', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('items');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+    });
+}
+// Recibe lo que el usuario comparte desde el menú del sistema (Web Share Target):
+// guarda texto y archivos en IndexedDB y abre la app para elegir los chats.
+self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+    if (event.request.method === 'POST' && url.pathname === '/compartir') {
+        event.respondWith((async () => {
+            try {
+                const fd = await event.request.formData();
+                const archivos = fd.getAll('archivos').filter((f) => f && typeof f !== 'string');
+                const item = {
+                    titulo: String(fd.get('title') || ''),
+                    texto: String(fd.get('text') || ''),
+                    url: String(fd.get('url') || ''),
+                    archivos: archivos,
+                    ts: Date.now()
+                };
+                const db = await abrirDbShare();
+                await new Promise((res, rej) => {
+                    const tx = db.transaction('items', 'readwrite');
+                    tx.objectStore('items').put(item, 'pendiente');
+                    tx.oncomplete = res;
+                    tx.onerror = () => rej(tx.error);
+                });
+                db.close();
+                return Response.redirect('/?compartido=1', 303);
+            } catch (e) {
+                return Response.redirect('/?compartido=error', 303);
+            }
+        })());
+    }
+});
 """.strip()
     return Response(js, mimetype='application/javascript', headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
+
+@app.route('/compartir', methods=['GET', 'POST'])
+def compartir_respaldo():
+    # Normalmente el service worker intercepta este POST. Si no estaba activo,
+    # llegamos aquí: no se pueden recuperar los archivos, así que avisamos.
+    from flask import redirect
+    return redirect('/?compartido=error', code=303)
 
 @app.route('/manifest.json')
 def manifest():
@@ -2735,6 +2994,19 @@ def manifest():
         'background_color': '#111b21',
         'theme_color': '#087ff5',
         'description': 'Mensajería web rápida con chats privados, grupos y notificaciones.',
+        'share_target': {
+            'action': '/compartir',
+            'method': 'POST',
+            'enctype': 'multipart/form-data',
+            'params': {
+                'title': 'title',
+                'text': 'text',
+                'url': 'url',
+                'files': [
+                    {'name': 'archivos', 'accept': ['image/*', 'video/*', 'audio/*', 'text/*', 'application/*']}
+                ]
+            }
+        },
         'icons': [
             {'src': '/favicon.png', 'sizes': '256x256', 'type': 'image/png', 'purpose': 'any maskable'}
         ]
