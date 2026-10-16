@@ -854,7 +854,7 @@ HTML_LAYOUT = """
             // bache de red, etc). Como es una conexión nueva por debajo, el servidor ya
             // no sabe que pertenecemos a nuestras salas de avisos: hay que re-suscribirse
             // a todo, si no, no volveria a llegar nada en directo hasta recargar la página.
-            socket.emit('conectar_usuario', { id: miUsuario.id });
+            identificarse();
             socket.emit('obtener_contactos', { id: miUsuario.id });
             if (document.visibilityState === 'visible') {
                 socket.emit('usuario_activo', { usuario_id: miUsuario.id });
@@ -876,6 +876,185 @@ HTML_LAYOUT = """
         let mensajeRespondiendo = null;
         let mensajeEditandoId = null;
         const cacheMensajes = {};
+
+        // ===== Copia local en el dispositivo (IndexedDB) =====
+        // Guarda contactos/grupos y los últimos mensajes de cada chat para pintarlos al instante
+        // al abrir la web; el servidor se consulta en segundo plano y corrige lo que haya cambiado.
+        let _cacheDbPromise = null;
+        function cacheDb() {
+            if (!_cacheDbPromise) {
+                _cacheDbPromise = new Promise((res, rej) => {
+                    try {
+                        const r = indexedDB.open('arxechat-cache', 1);
+                        r.onupgradeneeded = () => r.result.createObjectStore('kv');
+                        r.onsuccess = () => res(r.result);
+                        r.onerror = () => rej(r.error);
+                    } catch (e) { rej(e); }
+                }).catch(() => null);
+            }
+            return _cacheDbPromise;
+        }
+        async function cacheLeer(clave) {
+            const db = await cacheDb();
+            if (!db) return null;
+            return new Promise((res) => {
+                try {
+                    const rq = db.transaction('kv').objectStore('kv').get(clave);
+                    rq.onsuccess = () => res(rq.result === undefined ? null : rq.result);
+                    rq.onerror = () => res(null);
+                } catch (e) { res(null); }
+            });
+        }
+        async function cacheGuardar(clave, valor) {
+            const db = await cacheDb();
+            if (!db) return;
+            return new Promise((res) => {
+                try {
+                    const tx = db.transaction('kv', 'readwrite');
+                    tx.objectStore('kv').put(valor, clave);
+                    tx.oncomplete = () => res();
+                    tx.onerror = () => res();
+                    tx.onabort = () => res();
+                } catch (e) { res(); }
+            });
+        }
+        async function cacheBorrar(clave) {
+            const db = await cacheDb();
+            if (!db) return;
+            return new Promise((res) => {
+                try {
+                    const tx = db.transaction('kv', 'readwrite');
+                    tx.objectStore('kv').delete(clave);
+                    tx.oncomplete = () => res();
+                    tx.onerror = () => res();
+                } catch (e) { res(); }
+            });
+        }
+        async function cacheBorrarTodo() {
+            const db = await cacheDb();
+            if (!db) return;
+            return new Promise((res) => {
+                try {
+                    const tx = db.transaction('kv', 'readwrite');
+                    tx.objectStore('kv').clear();
+                    tx.oncomplete = () => res();
+                    tx.onerror = () => res();
+                } catch (e) { res(); }
+            });
+        }
+        function kContactos() { return 'c:' + miUsuario.id; }
+        function kChat(id) { return 'm:' + miUsuario.id + ':' + id; }
+
+        // Máximo 40 mensajes por chat y unos 3 millones de caracteres (las fotos/archivos van dentro del texto).
+        function recortarParaCache(msgs) {
+            const salida = [];
+            let total = 0;
+            for (let i = msgs.length - 1; i >= 0 && salida.length < 40; i--) {
+                const len = (msgs[i].texto || '').length;
+                if (salida.length > 0 && total + len > 3000000) break;
+                total += len;
+                salida.unshift(msgs[i]);
+            }
+            return salida;
+        }
+        function firmaMensajes(msgs) {
+            return msgs.map(m => m.id + ':' + (m.texto || '').length + ':' + (m.visto_en_pantalla ? 1 : 0) + ':' + (m.leido ? 1 : 0)).join('|');
+        }
+        function chatIdDeMensaje(m) {
+            if (m.esGrupo || m.es_grupo) return m.receptor;
+            return m.emisor === miUsuario.id ? m.receptor : m.emisor;
+        }
+        // Añade un mensaje nuevo (recibido o enviado) a la copia local de su chat, si ya existe esa copia.
+        async function cacheAgregarMensaje(msg) {
+            try {
+                if (!miUsuario || msg.id === undefined || msg.id === null) return;
+                const clave = kChat(chatIdDeMensaje(msg));
+                const previo = await cacheLeer(clave);
+                if (!previo || !Array.isArray(previo.mensajes)) return;
+                if (previo.mensajes.some(m => m.id === msg.id)) return;
+                previo.mensajes.push(msg);
+                previo.mensajes = recortarParaCache(previo.mensajes);
+                await cacheGuardar(clave, previo);
+            } catch (e) {}
+        }
+        async function cacheQuitarMensaje(id) {
+            try {
+                if (!miUsuario || !contactoActivo) return;
+                const clave = kChat(contactoActivo.id);
+                const previo = await cacheLeer(clave);
+                if (!previo) return;
+                previo.mensajes = previo.mensajes.filter(m => String(m.id) !== String(id));
+                await cacheGuardar(clave, previo);
+            } catch (e) {}
+        }
+        async function cacheEditarMensaje(id, texto) {
+            try {
+                if (!miUsuario || !contactoActivo) return;
+                const clave = kChat(contactoActivo.id);
+                const previo = await cacheLeer(clave);
+                if (!previo) return;
+                previo.mensajes.forEach(m => { if (String(m.id) === String(id)) m.texto = texto; });
+                await cacheGuardar(clave, previo);
+            } catch (e) {}
+        }
+
+        let contactosDelServidor = false;
+        async function cargarContactosDeCache() {
+            try {
+                if (!miUsuario) return;
+                const lista = await cacheLeer(kContactos());
+                if (Array.isArray(lista) && lista.length && !contactosDelServidor && misContactos.length === 0) {
+                    misContactos = lista;
+                    lista.forEach(c => { if (c.foto) cacheFotosUsuario[c.id] = c.foto; });
+                    renderizarContactos();
+                    if (compartidoPendiente && document.getElementById('compartirModal').style.display === 'none') mostrarCompartir();
+                }
+            } catch (e) {}
+        }
+
+        let aperturaChat = 0;
+        let historialServidorRecibido = false;
+        let firmaBaseChat = '';
+        async function mostrarChatDeCache(c, miApertura) {
+            try {
+                const guardado = await cacheLeer(kChat(c.id));
+                if (!guardado || !Array.isArray(guardado.mensajes) || guardado.mensajes.length === 0) return;
+                if (miApertura !== aperturaChat || historialServidorRecibido) return;
+                hayMasHistorial = !!guardado.hay_mas;
+                firmaBaseChat = firmaMensajes(guardado.mensajes);
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.innerHTML = '';
+                guardado.mensajes.forEach(msg => renderizarMensaje(msg));
+            } catch (e) {}
+        }
+
+        // ===== Cola de envío: si aún no hay conexión identificada, el mensaje espera y sale solo =====
+        let identificado = false;
+        const colaEnvio = [];
+        let temporizadorIdent = null;
+        function identificarse() {
+            if (!miUsuario) return;
+            identificado = false;
+            clearTimeout(temporizadorIdent);
+            socket.emit('conectar_usuario', { id: miUsuario.id }, () => {
+                identificado = true;
+                clearTimeout(temporizadorIdent);
+                vaciarColaEnvio();
+            });
+            // Si el servidor no confirma en 6 s (por ejemplo, se acaba de dormir), se reintenta.
+            temporizadorIdent = setTimeout(() => { if (!identificado && socket.connected) identificarse(); }, 6000);
+        }
+        function emitirMensaje(msg) {
+            if (socket.connected && identificado) socket.emit('mensaje_enviado', msg);
+            else colaEnvio.push(msg);
+        }
+        function vaciarColaEnvio() {
+            while (colaEnvio.length && socket.connected && identificado) {
+                socket.emit('mensaje_enviado', colaEnvio.shift());
+            }
+        }
+        socket.on('disconnect', () => { identificado = false; });
+
         const cacheFotosUsuario = {};
         let misContactos = [];
         let pushSubscriptionActiva = false;
@@ -1196,6 +1375,7 @@ HTML_LAYOUT = """
             } else {
                 alert(res.mensaje);
                 localStorage.removeItem('arxechat_sesion');
+                cacheBorrarTodo();
                 document.getElementById('authModal').style.display = 'flex';
                 document.getElementById('appContainer').style.display = 'none';
             }
@@ -1231,8 +1411,9 @@ HTML_LAYOUT = """
             // No pedir permiso automáticamente: en Android debe hacerse tras un clic del usuario.
             configurarNotificacionesPush({pedirPermiso: false});
             
-            socket.emit('conectar_usuario', { id: miUsuario.id });
+            identificarse();
             socket.emit('obtener_contactos', { id: miUsuario.id });
+            cargarContactosDeCache();
 
             document.addEventListener('visibilitychange', () => {
                 if (!miUsuario) return;
@@ -1240,6 +1421,12 @@ HTML_LAYOUT = """
                     socket.emit('usuario_inactivo', { usuario_id: miUsuario.id });
                 } else {
                     socket.emit('usuario_activo', { usuario_id: miUsuario.id });
+                    // Al volver a la app puede haberse perdido algún aviso (móviles que duermen la conexión):
+                    // se resincroniza la lista y el chat abierto, sin recargar la página.
+                    socket.emit('obtener_contactos', { id: miUsuario.id });
+                    if (contactoActivo) {
+                        socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: contactoActivo.id, esGrupo: contactoActivo.esGrupo });
+                    }
                 }
             });
         }
@@ -1328,6 +1515,7 @@ HTML_LAYOUT = """
         function confirmarEliminarContacto() {
             cerrarOpcionesContacto();
             if(contactoActivo && confirm("¿Eliminar este contacto? Si te vuelve a escribir podrás seguir recibiendo sus mensajes, pero dejará de estar en tu lista de contactos.")) {
+                cacheBorrar(kChat(contactoActivo.id));
                 socket.emit('eliminar_contacto', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 document.getElementById('messages').innerHTML = '';
                 document.getElementById('activeChatContainer').style.display = 'none';
@@ -1342,6 +1530,7 @@ HTML_LAYOUT = """
         function confirmarVaciarConversacion() {
             cerrarOpcionesContacto();
             if(contactoActivo && confirm("¿Vaciar esta conversación? Se borrará solo de tu lado; si la otra persona también la vacía, se elimina para siempre.")) {
+                cacheBorrar(kChat(contactoActivo.id));
                 socket.emit('vaciar_conversacion', { mi_id: miUsuario.id, contacto_id: contactoActivo.id });
                 document.getElementById('messages').innerHTML = '';
             }
@@ -1445,10 +1634,12 @@ HTML_LAYOUT = """
             if (!contactoActivo || !contactoActivo.esGrupo) return;
             const nombre = contactoActivo.nombre || 'este grupo';
             if (!confirm(`¿Vaciar la conversación de ${nombre} para TODOS? Se eliminarán permanentemente todos los mensajes del grupo y esta acción no se puede deshacer.`)) return;
+            cacheBorrar(kChat(contactoActivo.id));
             socket.emit('vaciar_grupo_permanentemente', { grupo_id: contactoActivo.id, usuario_id: miUsuario.id });
         }
 
         socket.on('grupo_conversacion_vaciada', (data) => {
+            if (miUsuario) cacheBorrar(kChat(data.grupo_id));
             if (!contactoActivo || contactoActivo.id !== data.grupo_id) return;
             document.getElementById('messages').innerHTML = '';
             cerrarAjustesGrupo();
@@ -1467,6 +1658,7 @@ HTML_LAYOUT = """
 
         // Broadcast a todos los miembros cuando el creador borra el grupo.
         socket.on('grupo_eliminado', (data) => {
+            if (miUsuario) cacheBorrar(kChat(data.grupo_id));
             if(contactoActivo && contactoActivo.esGrupo && contactoActivo.id === data.grupo_id) {
                 cerrarAjustesGrupo();
                 document.getElementById('messages').innerHTML = '';
@@ -1942,7 +2134,7 @@ HTML_LAYOUT = """
 
         function cerrarSesion() {
             localStorage.removeItem('arxechat_sesion');
-            location.reload();
+            Promise.race([cacheBorrarTodo(), new Promise(r => setTimeout(r, 1500))]).then(() => location.reload());
         }
 
         function eliminarCuenta() {
@@ -1952,8 +2144,9 @@ HTML_LAYOUT = """
             }
         }
 
-        socket.on('cuenta_eliminada', () => {
+        socket.on('cuenta_eliminada', async () => {
             localStorage.removeItem('arxechat_sesion');
+            await Promise.race([cacheBorrarTodo(), new Promise(r => setTimeout(r, 1500))]);
             alert('Tu cuenta ha sido eliminada.');
             location.reload();
         });
@@ -1991,9 +2184,19 @@ HTML_LAYOUT = """
                 const nuevo = lista.find(x => x.id === contactoActivo.id);
                 if (nuevo) { contactoActivo.insignia = !!nuevo.insignia; actualizarCabeceraNombre(); }
             }
+            contactosDelServidor = true;
             renderizarContactos();
+            if (miUsuario) cacheGuardar(kContactos(), lista);
             if (compartidoPendiente && document.getElementById('compartirModal').style.display === 'none') mostrarCompartir();
         });
+
+        let temporizadorRefrescoContactos = null;
+        function pedirRefrescoContactos(retardoMs) {
+            clearTimeout(temporizadorRefrescoContactos);
+            temporizadorRefrescoContactos = setTimeout(() => {
+                if (miUsuario) socket.emit('obtener_contactos', { id: miUsuario.id });
+            }, retardoMs || 0);
+        }
 
         function htmlInsignia(c) {
             if (!c || c.esGrupo || !c.insignia) return '';
@@ -2115,6 +2318,10 @@ HTML_LAYOUT = """
             }
             
             document.getElementById('messages').innerHTML = '';
+            const miApertura = ++aperturaChat;
+            historialServidorRecibido = false;
+            firmaBaseChat = '';
+            mostrarChatDeCache(c, miApertura);
             socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: c.id, esGrupo: c.esGrupo });
         }
 
@@ -2393,6 +2600,7 @@ HTML_LAYOUT = """
 
         socket.on('mensaje_editado', (data) => {
             if (cacheMensajes[data.mensaje_id]) cacheMensajes[data.mensaje_id].texto = data.nuevo_texto;
+            cacheEditarMensaje(data.mensaje_id, data.nuevo_texto);
             const fila = document.querySelector(`.msg-row[data-message-id="${data.mensaje_id}"]`);
             if (fila) reemplazarTextoMensaje(fila, data.nuevo_texto);
         });
@@ -2476,10 +2684,31 @@ HTML_LAYOUT = """
         let cargandoMasHistorial = false;
 
         socket.on('historial_cargado', (data) => {
+            // Respuesta de un chat que ya no es el que tengo abierto: se guarda la copia pero no se pinta.
+            if (data.chat_id && contactoActivo && data.chat_id !== contactoActivo.id) {
+                if (miUsuario) cacheGuardar(kChat(data.chat_id), { mensajes: recortarParaCache(data.mensajes), hay_mas: data.hay_mas });
+                return;
+            }
+            historialServidorRecibido = true;
             const messagesDiv = document.getElementById('messages');
-            messagesDiv.innerHTML = '';
             hayMasHistorial = data.hay_mas;
-            data.mensajes.forEach(msg => renderizarMensaje(msg));
+            const firmaServidor = firmaMensajes(data.mensajes);
+            const idsDom = Array.from(messagesDiv.querySelectorAll('.msg-row[data-message-id]')).map(el => el.dataset.messageId).join('|');
+            const idsServidor = data.mensajes.map(m => String(m.id)).join('|');
+            const hayPendientes = messagesDiv.querySelector('.msg-row[data-temp-id]:not([data-message-id])') !== null;
+            if (firmaServidor === firmaBaseChat && idsDom === idsServidor && !hayPendientes) {
+                // Lo que se veía desde la copia local ya era lo último: no se toca nada.
+            } else {
+                // Los mensajes que acabo de enviar y aún no tienen confirmación se conservan.
+                const pendientes = Array.from(messagesDiv.querySelectorAll('.msg-row[data-temp-id]:not([data-message-id])'));
+                pendientes.forEach(p => p.remove());
+                messagesDiv.innerHTML = '';
+                data.mensajes.forEach(msg => renderizarMensaje(msg));
+                pendientes.forEach(p => messagesDiv.appendChild(p));
+                if (pendientes.length) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
+            firmaBaseChat = firmaServidor;
+            if (miUsuario && contactoActivo) cacheGuardar(kChat(contactoActivo.id), { mensajes: recortarParaCache(data.mensajes), hay_mas: data.hay_mas });
         });
 
         socket.on('mas_historial_cargado', (data) => {
@@ -2520,6 +2749,7 @@ HTML_LAYOUT = """
             // Si es el eco de un mensaje que yo mismo mandé, ya lo pinté al instante
             // al pulsar "Enviar" (ver sendMessage). Si encontramos su fila por tempId,
             // no lo volvemos a pintar para no duplicarlo.
+            cacheAgregarMensaje(data);
             if (data.emisor === miUsuario.id && data.tempId) {
                 const filas = document.querySelectorAll('[data-temp-id]');
                 for (const filaExistente of filas) {
@@ -2537,9 +2767,24 @@ HTML_LAYOUT = """
             }
 
             if (esDelChatActivo) {
+                // Si ese mensaje ya está en pantalla (por ejemplo, vino también en el historial), no se duplica.
+                if (data.id !== undefined && data.id !== null && document.querySelector(`.msg-row[data-message-id="${data.id}"]`)) return;
                 renderizarMensaje(data);
             } else {
-                socket.emit('obtener_contactos', { id: miUsuario.id });
+                // Mensaje de otro chat: el contador sube al instante en pantalla (sin esperar al servidor)
+                // y después se sincroniza con el número real.
+                let conocido = false;
+                if (data.emisor !== miUsuario.id) {
+                    const idChat = (data.esGrupo || data.es_grupo) ? data.receptor : data.emisor;
+                    const c = misContactos.find(x => x.id === idChat);
+                    if (c) {
+                        conocido = true;
+                        c.sinLeer = (c.sinLeer || 0) + 1;
+                        renderizarContactos();
+                        if (miUsuario) cacheGuardar(kContactos(), misContactos);
+                    }
+                }
+                pedirRefrescoContactos(conocido ? 700 : 0);
             }
 
             if (data.emisor !== miUsuario.id && !pushSubscriptionActiva && Notification.permission === "granted") {
@@ -2553,6 +2798,7 @@ HTML_LAYOUT = """
         socket.on('mensaje_eliminado', (data) => {
             const fila = document.querySelector(`[data-message-id="${data.mensaje_id}"]`);
             if (fila) fila.remove();
+            cacheQuitarMensaje(data.mensaje_id);
             cerrarMenuMensaje();
         });
 
@@ -2607,7 +2853,7 @@ HTML_LAYOUT = """
                 // el mensaje complete el viaje de ida y vuelta al servidor para verlo.
                 renderizarMensaje(msgOptimista, tempId);
 
-                socket.emit('mensaje_enviado', msgOptimista);
+                emitirMensaje(msgOptimista);
                 input.value = '';
                 cancelarRespuesta();
             }
@@ -2769,7 +3015,7 @@ HTML_LAYOUT = """
                 tempId: tempId
             };
             if (contactoActivo && contactoActivo.id === c.id) renderizarMensaje(msg, tempId);
-            socket.emit('mensaje_enviado', msg);
+            emitirMensaje(msg);
         }
 
         async function enviarCompartido() {
@@ -2864,7 +3110,7 @@ HTML_LAYOUT = """
                     responde_a_emisor_id: mensajeRespondiendo ? mensajeRespondiendo.emisor : null,
                 };
                 renderizarMensaje(msgOptimista, tempId);
-                socket.emit('mensaje_enviado', msgOptimista);
+                emitirMensaje(msgOptimista);
                 cancelarRespuesta();
             }
         }
@@ -3153,6 +3399,9 @@ def conectar(data):
     contador_eventos_presencia['conectar_usuario'] += 1
     if estaba_desconectado:
         socketio.emit('estado_usuario', {'usuario_id': data['id'], 'en_linea': True, 'ultima_conexion': None})
+    # El valor devuelto llega al cliente como confirmación: así sabe que ya está identificado
+    # y puede mandar los mensajes que tuviera en cola.
+    return {'ok': True}
 
 def _marcar_desconectado(usuario_id):
     conn = get_db()
@@ -3893,7 +4142,7 @@ def cargar_historial(data):
     cursor.close()
     conn.close()
 
-    emit('historial_cargado', {'mensajes': historial, 'hay_mas': hay_mas})
+    emit('historial_cargado', {'mensajes': historial, 'hay_mas': hay_mas, 'chat_id': data['receptor']})
     if hubo_cambios:
         socketio.emit('contactos_cargados', _construir_lista_contactos(mi_id), room=mi_id)
 
