@@ -3093,6 +3093,10 @@ HTML_LAYOUT = """
                     alert('No se ha podido recibir lo que querías compartir. Inténtalo de nuevo.');
                     return;
                 }
+                if (estado === 'vacio') {
+                    alert('Arxechat se abrió desde Compartir, pero no recibió ningún texto ni archivo. Prueba a desinstalar la app de la pantalla de inicio y volver a instalarla para que se actualice.');
+                    return;
+                }
                 const db = await abrirDbShare();
                 const item = await new Promise((res) => {
                     const tx = db.transaction('items', 'readwrite');
@@ -3339,7 +3343,7 @@ HTML_LAYOUT = """
 @app.route('/service-worker.js')
 def service_worker():
     js = r"""
-const ARXECHAT_SW_VERSION = '2026-10-13-compartir-v1';
+const ARXECHAT_SW_VERSION = '2026-10-17-compartir-v2';
 self.addEventListener('push', (event) => {
     let data = {};
     try { data = event.data ? event.data.json() : {}; }
@@ -3408,7 +3412,7 @@ self.addEventListener('fetch', (event) => {
         event.respondWith((async () => {
             try {
                 const fd = await event.request.formData();
-                const archivos = fd.getAll('archivos').filter((f) => f && typeof f !== 'string');
+                const archivos = fd.getAll('archivos').filter((f) => f && typeof f !== 'string' && (f.size > 0 || f.name));
                 const item = {
                     titulo: String(fd.get('title') || ''),
                     texto: String(fd.get('text') || ''),
@@ -3424,6 +3428,9 @@ self.addEventListener('fetch', (event) => {
                     tx.onerror = () => rej(tx.error);
                 });
                 db.close();
+                if (!item.titulo && !item.texto && !item.url && archivos.length === 0) {
+                    return Response.redirect('/?compartido=vacio', 303);
+                }
                 return Response.redirect('/?compartido=1', 303);
             } catch (e) {
                 return Response.redirect('/?compartido=error', 303);
@@ -3462,7 +3469,7 @@ def manifest():
                 'text': 'text',
                 'url': 'url',
                 'files': [
-                    {'name': 'archivos', 'accept': ['image/*', 'video/*', 'audio/*', 'text/*', 'application/*']}
+                    {'name': 'archivos', 'accept': ['image/*', 'video/*', 'audio/*', 'application/*']}
                 ]
             }
         },
