@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 from flask import Flask, render_template_string, jsonify, Response, request
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, rooms
 from pywebpush import webpush, WebPushException
 
 app = Flask(__name__)
@@ -281,6 +281,13 @@ def init_db():
         )
     ''')
     
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orden_chats (
+            usuario_id TEXT PRIMARY KEY,
+            orden TEXT
+        )
+    ''')
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -447,8 +454,13 @@ HTML_LAYOUT = """
         body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
         
         .compartir-fila { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid var(--border-color); cursor: pointer; text-align: left; }
-        .compartir-fila input { width: 20px; height: 20px; margin: 0; flex-shrink: 0; }
-        .compartir-fila .compartir-nombre { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .compartir-fila { color: var(--text-main); }
+        .orden-fila { display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--border-color); color: var(--text-main); background: var(--bg-card); }
+        .orden-fila .orden-asa { font-size: 1.4rem; padding: 6px 10px; cursor: grab; touch-action: none; user-select: none; color: var(--text-sub); }
+        .orden-fila .orden-nombre { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .orden-fila.arrastrando { background: var(--bg-input); box-shadow: 0 4px 14px rgba(0,0,0,0.35); position: relative; z-index: 2; }
+        .modal-box .compartir-fila input[type="checkbox"] { width: 22px; height: 22px; min-width: 22px; padding: 0; margin: 0; flex: 0 0 22px; accent-color: var(--accent); background: transparent; }
+        .compartir-fila .compartir-nombre { flex: 1; min-width: 0; color: var(--text-main); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .badge-verif { width: 2.3em; height: 2.3em; vertical-align: middle; margin: 0 0 0 4px; cursor: pointer; object-fit: contain; }
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
@@ -587,6 +599,16 @@ HTML_LAYOUT = """
         </div>
     </div>
 
+    <div class="modal-overlay" id="ordenModal" style="display:none; z-index:1100;">
+        <div class="modal-box" style="text-align:left;">
+            <span class="close-btn" onclick="cerrarEditarOrden()">&times;</span>
+            <h2 style="text-align:center;">Editar contactos y grupos</h2>
+            <p style="font-size:0.85rem; color: var(--text-sub); margin-bottom:8px;">Mantén pulsado el icono ☰ de cada chat y arrástralo para colocarlo donde quieras. Este es el orden en que se verán cuando no tengas mensajes sin leer.</p>
+            <div id="ordenLista" style="max-height: 52vh; overflow-y: auto; touch-action: pan-y;"></div>
+            <button type="button" class="btn-action" onclick="cerrarEditarOrden()">Listo</button>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="insigniaModal" style="display:none;" onclick="if(event.target===this)cerrarInsignia()">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarInsignia()">&times;</span>
@@ -681,6 +703,7 @@ HTML_LAYOUT = """
             
             <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
             <button type="button" class="btn-action" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirCambiarContrasena()">Cambiar contraseña</button>
+            <button type="button" class="btn-action" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditarOrden()">Editar contactos y grupos</button>
             
             <label class="file-label">Tema visual:</label>
             <select id="editTheme">
@@ -812,6 +835,7 @@ HTML_LAYOUT = """
                         <div>
                             <div id="activeName" class="contact-name">Contacto / Grupo</div>
                             <div id="activeStatus" style="font-size:0.8rem; color: var(--text-sub);">En línea</div>
+                            <div id="activeTyping" style="display:none; font-size:0.8rem; color: var(--accent); font-weight: 600;"></div>
                         </div>
                         <button type="button" id="btnAddContactBanner" class="add-contact-banner" style="display:none;" onclick="guardarContactoOAceptarGrupo()"></button>
                     </div>
@@ -2179,7 +2203,7 @@ HTML_LAYOUT = """
 
         socket.on('contactos_cargados', (lista) => {
             misContactos = lista;
-            lista.forEach(c => { if (c.foto) cacheFotosUsuario[c.id] = c.foto; });
+            lista.forEach((c, i) => { c._base = i; if (c.foto) cacheFotosUsuario[c.id] = c.foto; });
             if (contactoActivo) {
                 const nuevo = lista.find(x => x.id === contactoActivo.id);
                 if (nuevo) { contactoActivo.insignia = !!nuevo.insignia; actualizarCabeceraNombre(); }
@@ -2190,12 +2214,176 @@ HTML_LAYOUT = """
             if (compartidoPendiente && document.getElementById('compartirModal').style.display === 'none') mostrarCompartir();
         });
 
+        // Orden "de reposo": primero los chats colocados a mano en Ajustes, luego el resto como llegan del servidor.
+        function ordenBase(c) {
+            const o = (c.orden === null || c.orden === undefined) ? 100000 : c.orden;
+            return o * 100000 + (c._base || 0);
+        }
+
+        // ===== "Escribiendo..." =====
+        const escribiendoPor = {};   // idChat -> { idUsuario: { nombre, t } }
+        let ultimoAvisoEscribiendo = 0;
+        function nombresEscribiendo(idChat) {
+            const m = escribiendoPor[idChat];
+            return m ? Object.keys(m).map(k => m[k].nombre || 'Alguien') : [];
+        }
+        function textoEscribiendo(nombres, esGrupo) {
+            if (!nombres.length) return '';
+            if (!esGrupo) return 'escribiendo...';
+            if (nombres.length === 1) return nombres[0] + ' está escribiendo...';
+            if (nombres.length === 2) return nombres[0] + ' y ' + nombres[1] + ' están escribiendo...';
+            return 'Varias personas están escribiendo...';
+        }
+        function escribiendoLista(c) {
+            const t = textoEscribiendo(nombresEscribiendo(c.id), c.esGrupo);
+            if (t) return '<span style="color: var(--accent); font-weight:600;">' + escHtmlCompartir(t) + '</span>';
+            return c.esGrupo ? 'Grupo' : 'ID: ' + c.id;
+        }
+        function refrescarEscribiendo() {
+            const st = document.getElementById('activeStatus');
+            const ty = document.getElementById('activeTyping');
+            if (st && ty) {
+                const t = contactoActivo ? textoEscribiendo(nombresEscribiendo(contactoActivo.id), contactoActivo.esGrupo) : '';
+                if (t) { ty.textContent = t; ty.style.display = 'block'; st.style.display = 'none'; }
+                else { ty.style.display = 'none'; st.style.display = ''; }
+            }
+            renderizarContactos();
+        }
+        function quitarEscribiendo(idChat, idUsuario) {
+            const m = escribiendoPor[idChat];
+            if (!m || !m[idUsuario]) return;
+            clearTimeout(m[idUsuario].t);
+            delete m[idUsuario];
+            if (!Object.keys(m).length) delete escribiendoPor[idChat];
+            refrescarEscribiendo();
+        }
+        socket.on('usuario_escribiendo', (d) => {
+            if (!miUsuario || !d || d.usuario_id === miUsuario.id) return;
+            const m = escribiendoPor[d.chat_id] || (escribiendoPor[d.chat_id] = {});
+            const nuevo = !m[d.usuario_id];
+            if (m[d.usuario_id]) clearTimeout(m[d.usuario_id].t);
+            m[d.usuario_id] = { nombre: d.nombre, t: setTimeout(() => quitarEscribiendo(d.chat_id, d.usuario_id), 4500) };
+            if (nuevo) refrescarEscribiendo();
+        });
+        socket.on('usuario_dejo_escribir', (d) => {
+            if (d) quitarEscribiendo(d.chat_id, d.usuario_id);
+        });
+        function avisarEscribiendo(dejo) {
+            if (!miUsuario || !contactoActivo || !socket.connected || !identificado) return;
+            const base = { usuario_id: miUsuario.id, receptor: contactoActivo.id, esGrupo: !!contactoActivo.esGrupo };
+            if (dejo) { ultimoAvisoEscribiendo = 0; socket.emit('dejo_de_escribir', base); return; }
+            const ahora = Date.now();
+            if (ahora - ultimoAvisoEscribiendo < 2500) return;
+            ultimoAvisoEscribiendo = ahora;
+            socket.emit('escribiendo', base);
+        }
+
         let temporizadorRefrescoContactos = null;
         function pedirRefrescoContactos(retardoMs) {
             clearTimeout(temporizadorRefrescoContactos);
             temporizadorRefrescoContactos = setTimeout(() => {
                 if (miUsuario) socket.emit('obtener_contactos', { id: miUsuario.id });
             }, retardoMs || 0);
+        }
+
+        // ===== Ajustes: editar el orden de contactos y grupos =====
+        function abrirEditarOrden() {
+            const cont = document.getElementById('ordenLista');
+            cont.innerHTML = '';
+            const base = misContactos.slice().sort((a, b) => ordenBase(a) - ordenBase(b));
+            base.forEach((c) => {
+                const fila = document.createElement('div');
+                fila.className = 'orden-fila';
+                fila.dataset.id = c.id;
+                const asa = document.createElement('div');
+                asa.className = 'orden-asa';
+                asa.textContent = '☰';
+                asa.addEventListener('pointerdown', (ev) => empezarArrastreOrden(ev, fila));
+                fila.appendChild(asa);
+                const foto = c.foto || cacheFotosUsuario[c.id];
+                if (foto) {
+                    const im = document.createElement('img');
+                    im.src = foto;
+                    im.className = 'user-avatar';
+                    fila.appendChild(im);
+                } else {
+                    const av = document.createElement('div');
+                    av.className = 'user-avatar';
+                    av.textContent = String(c.nombre).charAt(0).toUpperCase();
+                    fila.appendChild(av);
+                }
+                const nom = document.createElement('div');
+                nom.className = 'orden-nombre';
+                nom.textContent = c.nombre + (c.esGrupo ? ' (Grupo)' : '');
+                fila.appendChild(nom);
+                cont.appendChild(fila);
+            });
+            if (!cont.children.length) cont.textContent = 'Todavía no tienes chats.';
+            document.getElementById('ordenModal').style.display = 'flex';
+        }
+        function cerrarEditarOrden() {
+            document.getElementById('ordenModal').style.display = 'none';
+        }
+        function empezarArrastreOrden(ev, fila) {
+            ev.preventDefault();
+            const cont = document.getElementById('ordenLista');
+            const asa = ev.currentTarget;
+            try { asa.setPointerCapture(ev.pointerId); } catch (e) {}
+            const inicioY = ev.clientY;
+            const inicioScroll = cont.scrollTop;
+            let ultimoY = ev.clientY;
+            let destino = null;      // fila ANTES de la cual se soltará (null = al final)
+            fila.classList.add('arrastrando');
+
+            // La fila arrastrada no cambia de sitio en el DOM mientras se arrastra (así el gesto no se corta
+            // en móviles): solo se desplaza visualmente y se marca dónde caerá.
+            const pintar = () => {
+                const dy = (ultimoY - inicioY) + (cont.scrollTop - inicioScroll);
+                fila.style.transform = 'translateY(' + dy + 'px)';
+                const rf = fila.getBoundingClientRect();
+                const centro = rf.top + rf.height / 2;
+                const otras = Array.from(cont.children).filter(x => x !== fila);
+                destino = null;
+                for (const o of otras) {
+                    const b = o.getBoundingClientRect();
+                    if (centro < b.top + b.height / 2) { destino = o; break; }
+                }
+                otras.forEach(o => { o.style.boxShadow = ''; });
+                if (destino) destino.style.boxShadow = '0 -3px 0 0 var(--accent)';
+                else if (otras.length) otras[otras.length - 1].style.boxShadow = '0 3px 0 0 var(--accent)';
+            };
+            const cinta = setInterval(() => {
+                const r = cont.getBoundingClientRect();
+                if (ultimoY < r.top + 30) { cont.scrollTop -= 10; pintar(); }
+                else if (ultimoY > r.bottom - 30) { cont.scrollTop += 10; pintar(); }
+            }, 30);
+            const mover = (e) => { ultimoY = e.clientY; pintar(); };
+            const soltar = () => {
+                clearInterval(cinta);
+                asa.removeEventListener('pointermove', mover);
+                asa.removeEventListener('pointerup', soltar);
+                asa.removeEventListener('pointercancel', soltar);
+                Array.from(cont.children).forEach(o => { o.style.boxShadow = ''; });
+                fila.style.transform = '';
+                fila.classList.remove('arrastrando');
+                if (destino) cont.insertBefore(fila, destino); else cont.appendChild(fila);
+                guardarOrdenChats();
+            };
+            asa.addEventListener('pointermove', mover);
+            asa.addEventListener('pointerup', soltar);
+            asa.addEventListener('pointercancel', soltar);
+        }
+        function guardarOrdenChats() {
+            const ids = Array.from(document.getElementById('ordenLista').children).map(f => f.dataset.id).filter(Boolean);
+            ids.forEach((id, i) => {
+                const c = misContactos.find(x => x.id === id);
+                if (c) c.orden = i;
+            });
+            renderizarContactos();
+            if (miUsuario) {
+                cacheGuardar(kContactos(), misContactos);
+                socket.emit('guardar_orden_chats', { usuario_id: miUsuario.id, orden: ids });
+            }
         }
 
         function htmlInsignia(c) {
@@ -2248,7 +2436,17 @@ HTML_LAYOUT = """
             const listaDiv = document.getElementById('contactsList');
             listaDiv.innerHTML = '';
             
-            misContactos.sort((a, b) => (b.sinLeer || 0) - (a.sinLeer || 0));
+            // Primero los chats con mensajes sin leer, el que escribió más recientemente arriba;
+            // después el resto, en el orden personal de Ajustes (o el de siempre si no se ha tocado).
+            misContactos.sort((a, b) => {
+                const ua = (a.sinLeer || 0) > 0, ub = (b.sinLeer || 0) > 0;
+                if (ua !== ub) return ua ? -1 : 1;
+                if (ua && ub) {
+                    const d = (Date.parse(b.ultima) || 0) - (Date.parse(a.ultima) || 0);
+                    if (d !== 0) return d;
+                }
+                return ordenBase(a) - ordenBase(b);
+            });
 
             misContactos.forEach(c => {
                 const btn = document.createElement('button');
@@ -2271,7 +2469,7 @@ HTML_LAYOUT = """
                     ${avatarHtml}
                     <div class="contact-info">
                         <div class="contact-name">${c.nombre}${htmlInsignia(c)} ${etiqueta}</div>
-                        <div class="contact-id">${c.esGrupo ? 'Grupo' : 'ID: ' + c.id}</div>
+                        <div class="contact-id">${escribiendoLista(c)}</div>
                     </div>
                     ${badgeHtml}
                 `;
@@ -2322,6 +2520,7 @@ HTML_LAYOUT = """
             historialServidorRecibido = false;
             firmaBaseChat = '';
             mostrarChatDeCache(c, miApertura);
+            refrescarEscribiendo();
             socket.emit('cargar_historial', { emisor: miUsuario.id, receptor: c.id, esGrupo: c.esGrupo });
         }
 
@@ -2750,6 +2949,12 @@ HTML_LAYOUT = """
             // al pulsar "Enviar" (ver sendMessage). Si encontramos su fila por tempId,
             // no lo volvemos a pintar para no duplicarlo.
             cacheAgregarMensaje(data);
+            if (data.emisor !== miUsuario.id) quitarEscribiendo((data.esGrupo || data.es_grupo) ? data.receptor : data.emisor, data.emisor);
+            {
+                const idChatMsg = (data.esGrupo || data.es_grupo) ? data.receptor : (data.emisor === miUsuario.id ? data.receptor : data.emisor);
+                const cMsg = misContactos.find(x => x.id === idChatMsg);
+                if (cMsg && data.fecha) cMsg.ultima = data.fecha;
+            }
             if (data.emisor === miUsuario.id && data.tempId) {
                 const filas = document.querySelectorAll('[data-temp-id]');
                 for (const filaExistente of filas) {
@@ -2827,6 +3032,7 @@ HTML_LAYOUT = """
                 return;
             }
 
+            avisarEscribiendo(true);
             {
                 const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
                 const msgOptimista = {
@@ -3114,6 +3320,13 @@ HTML_LAYOUT = """
                 cancelarRespuesta();
             }
         }
+
+        document.getElementById('messageInput').addEventListener('input', () => {
+            const v = document.getElementById('messageInput').value;
+            if (mensajeEditandoId) return;
+            if (v.trim() === '') avisarEscribiendo(true);
+            else avisarEscribiendo(false);
+        });
 
         document.getElementById('messageInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendMessage();
@@ -3537,6 +3750,7 @@ def eliminar_cuenta(data):
         cursor.execute("DELETE FROM miembros_grupo WHERE usuario_id = %s", (usuario_id,))
         cursor.execute("DELETE FROM push_subscriptions WHERE usuario_id = %s", (usuario_id,))
         cursor.execute("DELETE FROM chat_vaciado WHERE usuario_id = %s", (usuario_id,))
+        cursor.execute("DELETE FROM orden_chats WHERE usuario_id = %s", (usuario_id,))
         cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
         conn.commit()
         cursor.close()
@@ -3854,6 +4068,24 @@ def _construir_lista_contactos(mi_id):
     """, (mi_id, mi_id, mi_id))
     unread_por_clave = {r['clave_chat']: r['unread'] for r in cursor.fetchall()}
 
+    # Fecha del último mensaje de cada chat (para ordenar los chats con mensajes sin leer
+    # del más reciente al más antiguo).
+    cursor.execute("""
+        SELECT m.clave_chat, MAX(m.fecha) AS ultima
+        FROM mensajes m
+        WHERE (m.es_grupo = 0 AND (m.emisor = %s OR m.receptor = %s))
+           OR (m.es_grupo = 1 AND EXISTS (
+                SELECT 1 FROM miembros_grupo mg
+                WHERE mg.grupo_id = m.clave_chat AND mg.usuario_id = %s
+           ))
+        GROUP BY m.clave_chat
+    """, (mi_id, mi_id, mi_id))
+    ultima_por_clave = {}
+    for r in cursor.fetchall():
+        f = r['ultima']
+        if f:
+            ultima_por_clave[r['clave_chat']] = f.isoformat() + ('Z' if f.tzinfo is None else '')
+
     cursor.execute("""
         SELECT u.id, u.nombre, u.foto, COALESCE(u.insignia, FALSE) AS insignia 
         FROM contactos c 
@@ -3862,7 +4094,7 @@ def _construir_lista_contactos(mi_id):
     """, (mi_id,))
     for r in cursor.fetchall():
         clave = "_".join(sorted([mi_id, r['id']]))
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'insignia': bool(r['insignia']), 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0)})
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'insignia': bool(r['insignia']), 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0), 'ultima': ultima_por_clave.get(clave)})
         ids_agregados.add(r['id'])
 
     cursor.execute("""
@@ -3890,7 +4122,7 @@ def _construir_lista_contactos(mi_id):
         cursor.execute("SELECT id, nombre, foto, COALESCE(insignia, FALSE) AS insignia FROM usuarios WHERE id = ANY(%s)", (list(otros_ids),))
         for u in cursor.fetchall():
             clave = "_".join(sorted([mi_id, u['id']]))
-            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'insignia': bool(u['insignia']), 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0)})
+            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'insignia': bool(u['insignia']), 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0), 'ultima': ultima_por_clave.get(clave)})
             ids_agregados.add(u['id'])
 
     cursor.execute("""
@@ -3900,11 +4132,103 @@ def _construir_lista_contactos(mi_id):
         WHERE mg.usuario_id = %s
     """, (mi_id,))
     for r in cursor.fetchall():
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread_por_clave.get(r['id'], 0)})
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'esGuardado': bool(r['aceptado']), 'esGrupo': True, 'sinLeer': unread_por_clave.get(r['id'], 0), 'ultima': ultima_por_clave.get(r['id'])})
+
+    # Orden personal elegido por el usuario en Ajustes (lista de ids). Se manda como 'orden' (posición)
+    # dentro de cada chat; los que no estén en la lista llevan None y van después, en el orden por defecto.
+    cursor.execute("SELECT orden FROM orden_chats WHERE usuario_id = %s", (mi_id,))
+    fila_orden = cursor.fetchone()
+    posiciones = {}
+    if fila_orden and fila_orden['orden']:
+        try:
+            for i, cid in enumerate(json.loads(fila_orden['orden'])):
+                posiciones.setdefault(str(cid), i)
+        except Exception:
+            posiciones = {}
+    for entrada in lista:
+        entrada['orden'] = posiciones.get(entrada['id'])
 
     cursor.close()
     conn.close()
     return lista
+
+_cache_nombres_usuario = {}
+def _nombre_de_usuario(uid):
+    hoy = datetime.datetime.utcnow().timestamp()
+    previo = _cache_nombres_usuario.get(uid)
+    if previo and hoy - previo[1] < 60:
+        return previo[0]
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT nombre FROM usuarios WHERE id = %s", (uid,))
+        fila = cursor.fetchone()
+        cursor.close()
+    finally:
+        conn.close()
+    nombre = fila['nombre'] if fila else ''
+    _cache_nombres_usuario[uid] = (nombre, hoy)
+    return nombre
+
+@socketio.on('escribiendo')
+def escribiendo(data):
+    # "Está escribiendo...": se retransmite solo a la otra persona (o a los miembros del grupo).
+    uid = data.get('usuario_id')
+    receptor = data.get('receptor')
+    if not uid or not receptor or sid_a_usuario.get(request.sid) != uid:
+        return
+    if data.get('esGrupo'):
+        if receptor not in rooms():
+            return  # no eres miembro de ese grupo
+        emit('usuario_escribiendo', {'chat_id': receptor, 'usuario_id': uid, 'nombre': _nombre_de_usuario(uid), 'esGrupo': True},
+             room=receptor, include_self=False)
+    else:
+        emit('usuario_escribiendo', {'chat_id': uid, 'usuario_id': uid, 'nombre': _nombre_de_usuario(uid), 'esGrupo': False},
+             room=receptor)
+
+@socketio.on('dejo_de_escribir')
+def dejo_de_escribir(data):
+    uid = data.get('usuario_id')
+    receptor = data.get('receptor')
+    if not uid or not receptor or sid_a_usuario.get(request.sid) != uid:
+        return
+    if data.get('esGrupo'):
+        if receptor not in rooms():
+            return
+        emit('usuario_dejo_escribir', {'chat_id': receptor, 'usuario_id': uid}, room=receptor, include_self=False)
+    else:
+        emit('usuario_dejo_escribir', {'chat_id': uid, 'usuario_id': uid}, room=receptor)
+
+@socketio.on('guardar_orden_chats')
+def guardar_orden_chats(data):
+    usuario_id = data.get('usuario_id')
+    if not usuario_id or sid_a_usuario.get(request.sid) != usuario_id:
+        emit('orden_chats_guardado', {'exito': False})
+        return
+    orden = data.get('orden')
+    if not isinstance(orden, list):
+        emit('orden_chats_guardado', {'exito': False})
+        return
+    limpio = []
+    vistos = set()
+    for cid in orden[:1000]:
+        if isinstance(cid, (str, int)) and str(cid) not in vistos:
+            vistos.add(str(cid))
+            limpio.append(str(cid))
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_chats (usuario_id, orden) VALUES (%s, %s) "
+            "ON CONFLICT (usuario_id) DO UPDATE SET orden = EXCLUDED.orden",
+            (usuario_id, json.dumps(limpio)))
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+    emit('orden_chats_guardado', {'exito': True})
+    # El mismo orden se ve al instante en tus demás dispositivos conectados.
+    socketio.emit('contactos_cargados', _construir_lista_contactos(usuario_id), room=usuario_id)
 
 @socketio.on('obtener_contactos')
 def obtener_contactos(data):
