@@ -451,7 +451,7 @@ HTML_LAYOUT = """
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
-        body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
+        body { background-color: var(--bg-body); color: var(--text-main); height: 100vh; height: 100dvh; height: var(--app-h, 100dvh); display: flex; justify-content: center; align-items: center; overflow: hidden; transition: background 0.3s, color 0.3s; }
         
         .compartir-fila { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid var(--border-color); cursor: pointer; text-align: left; }
         .compartir-fila { color: var(--text-main); }
@@ -484,7 +484,7 @@ HTML_LAYOUT = """
         .member-info { display: flex; align-items: center; gap: 10px; }
         .member-btn { background: var(--accent); border: none; color: white; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
 
-        .app-container { width: 100%; height: 100vh; display: flex; background: var(--bg-card); display: none; }
+        .app-container { width: 100%; height: 100vh; height: 100dvh; height: var(--app-h, 100dvh); overflow: hidden; display: flex; background: var(--bg-card); display: none; }
         
         .sidebar { width: 350px; flex-shrink: 0; border-right: 1px solid var(--border-color); display: flex; flex-direction: column; background: var(--bg-card); }
         .sidebar-header { background: var(--bg-header); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
@@ -501,17 +501,20 @@ HTML_LAYOUT = """
         .contact-id { font-size: 0.8rem; color: var(--text-sub); }
         .unread-badge { background: var(--accent); color: white; border-radius: 50%; padding: 2px 8px; font-size: 0.75rem; font-weight: bold; margin-left: 8px; flex-shrink: 0; }
 
-        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; min-width: 0; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-body); position: relative; min-width: 0; min-height: 0; overflow: hidden; }
         .empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: var(--text-sub); padding: 20px; }
         .empty-state h3 { color: var(--text-main); margin-bottom: 10px; font-size: 1.5rem; }
         
-        .active-chat-container { flex: 1; display: none; flex-direction: column; height: 100%; position: relative; z-index: 1; }
+        .active-chat-container { flex: 1; display: none; flex-direction: column; height: 100%; min-height: 0; position: relative; z-index: 1; }
         .chat-header { background: var(--bg-header); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); }
         .chat-header-user { display: flex; align-items: center; gap: 12px; }
         .add-contact-banner { background: var(--accent); color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: bold; cursor: pointer; margin-left: 10px; }
         .chat-menu-btn { background: none; border: none; color: var(--text-sub); font-size: 1.8rem; cursor: pointer; padding: 5px 10px; }
         
-        .chat-messages-wrapper { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+        .chat-messages-wrapper { flex: 1; min-height: 0; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+        .chat-messages { min-height: 0; }
+        .chat-header, .chat-input-area, #replyPreviewBar { flex-shrink: 0; }
+        .sidebar { min-height: 0; }
         .drop-overlay { display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.55); color: #fff; font-size: 1.2rem; font-weight: bold; align-items: center; justify-content: center; z-index: 50; border: 3px dashed var(--accent); pointer-events: none; text-align: center; padding: 20px; }
         .drop-overlay.activo { display: flex; }
         .chat-bg-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background-size: cover; background-position: center; z-index: 0; pointer-events: none; }
@@ -539,6 +542,14 @@ HTML_LAYOUT = """
         .message-context-menu button.delete { color:#ea4335; font-weight:600; }
 
         .chat-input-area { background: var(--bg-header); padding: 12px 16px; display: flex; gap: 10px; align-items: center; z-index: 2; }
+        @media (max-height: 560px) {
+            .chat-header { padding: 5px 12px; }
+            .chat-header .user-avatar { width: 34px; height: 34px; }
+            .chat-input-area { padding: 6px 12px; gap: 8px; }
+            .chat-messages { padding: 10px 14px; gap: 6px; }
+            .sidebar-header { padding: 6px 12px; }
+            .contact-item { padding: 8px 14px; }
+        }
         #replyPreviewBar { background: var(--bg-header); border-left: 3px solid var(--accent); padding: 8px 34px 8px 12px; margin: 0 16px; border-radius: 6px; position: relative; }
         #replyPreviewBar .close-reply { position: absolute; right: 8px; top: 6px; cursor: pointer; font-size: 1.2rem; color: var(--text-sub); line-height: 1; }
         .msg-row { position: relative; touch-action: pan-y; }
@@ -865,6 +876,19 @@ HTML_LAYOUT = """
     </div>
 
     <script>
+        // La altura de la app se ajusta a lo que de verdad se ve (los navegadores de móvil y tablet
+        // cuentan 100vh como si no tuvieran barras, y eso tapaba la cabecera o la barra de escribir).
+        function ajustarAlturaApp() {
+            let h = window.innerHeight;
+            const vv = window.visualViewport;
+            if (vv && Math.abs(vv.scale - 1) < 0.01 && vv.height > 0) h = vv.height;
+            document.documentElement.style.setProperty('--app-h', Math.round(h) + 'px');
+        }
+        ajustarAlturaApp();
+        window.addEventListener('resize', ajustarAlturaApp);
+        window.addEventListener('orientationchange', () => setTimeout(ajustarAlturaApp, 250));
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', ajustarAlturaApp);
+
         const socket = io();
         let esPrimeraConexion = true;
 
@@ -3087,7 +3111,16 @@ HTML_LAYOUT = """
             try {
                 const p = new URLSearchParams(location.search);
                 const estado = p.get('compartido');
-                if (!estado) return;
+                if (!estado) {
+                    // Entrada por enlace (por ejemplo, desde un Atajo de iPhone/iPad): /?texto=...&titulo=...&url=...
+                    const t = p.get('texto'), ti = p.get('titulo'), u = p.get('url');
+                    if (t || ti || u) {
+                        history.replaceState(null, '', '/');
+                        compartidoPendiente = { titulo: (ti || '').slice(0, 500), texto: (t || '').slice(0, 20000), url: (u || '').slice(0, 4000), archivos: [], ts: Date.now() };
+                        if (miUsuario && misContactos.length > 0) mostrarCompartir();
+                    }
+                    return;
+                }
                 history.replaceState(null, '', '/');
                 if (estado === 'error') {
                     alert('No se ha podido recibir lo que querías compartir. Inténtalo de nuevo.');
