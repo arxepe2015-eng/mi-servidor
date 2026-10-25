@@ -5,6 +5,9 @@ import base64
 import datetime
 import re
 import hmac
+import hashlib
+import time
+import html as html_lib
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -2208,7 +2211,21 @@ HTML_LAYOUT = """
             }
         });
 
+        // Abrir un chat concreto (al tocar una notificación): ?abrir=ID o mensaje del service worker.
+        let chatPendienteAbrir = null;
+        function abrirChatPorId(id) {
+            if (!id) return;
+            const c = misContactos.find(x => x.id === id);
+            if (c) { chatPendienteAbrir = null; seleccionarContacto(c); }
+            else chatPendienteAbrir = id;
+        }
+        try {
+            const idUrl = new URLSearchParams(location.search).get('abrir');
+            if (idUrl) { chatPendienteAbrir = idUrl; history.replaceState(null, '', '/'); }
+        } catch (e) {}
+
         navigator.serviceWorker?.addEventListener('message', (event) => {
+            if (event.data?.type === 'ABRIR_CHAT') abrirChatPorId(event.data.id);
             if (event.data?.type === 'PUSH_SUBSCRIPTION_CHANGED' && event.data.subscription && miUsuario) {
                 socket.emit('guardar_suscripcion_push', {
                     usuario_id: miUsuario.id,
@@ -2234,6 +2251,7 @@ HTML_LAYOUT = """
             }
             contactosDelServidor = true;
             renderizarContactos();
+            if (chatPendienteAbrir) abrirChatPorId(chatPendienteAbrir);
             if (miUsuario) cacheGuardar(kContactos(), lista);
             if (compartidoPendiente && document.getElementById('compartirModal').style.display === 'none') mostrarCompartir();
         });
@@ -3376,7 +3394,7 @@ HTML_LAYOUT = """
 @app.route('/service-worker.js')
 def service_worker():
     js = r"""
-const ARXECHAT_SW_VERSION = '2026-10-17-compartir-v2';
+const ARXECHAT_SW_VERSION = '2026-10-18-responder-v1';
 self.addEventListener('push', (event) => {
     let data = {};
     try { data = event.data ? event.data.json() : {}; }
@@ -3389,19 +3407,55 @@ self.addEventListener('push', (event) => {
         renotify: true,
         requireInteraction: false,
         timestamp: Date.now(),
-        data: { url: data.url || '/' }
+        actions: Array.isArray(data.actions) ? data.actions : [],
+        data: { url: data.url || '/', token: data.reply_token || '', chat_id: data.chat_id || '', title: data.title || 'Arxechat', icon: data.icon || '', tag: data.tag || 'arxechat-message' }
     };
     event.waitUntil(self.registration.showNotification(data.title || 'Arxechat', options));
 });
 self.addEventListener('notificationclick', (event) => {
-    event.notification.close();
-    const targetUrl = (event.notification.data && event.notification.data.url) || '/';
+    const notif = event.notification;
+    const d = notif.data || {};
+    // Respuesta rápida: Android escribe el texto dentro de la propia notificación (event.reply).
+    // En ordenador el botón "Responder" no trae texto: se abre el chat para escribir ahí.
+    if (event.action === 'reply' && event.reply && d.token) {
+        event.waitUntil((async () => {
+            const texto = String(event.reply).trim();
+            let ok = false;
+            try {
+                const r = await fetch('/api/responder-notificacion', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: d.token, texto: texto })
+                });
+                ok = r.ok;
+            } catch (e) { ok = false; }
+            await self.registration.showNotification(d.title || 'Arxechat', {
+                body: ok ? ('Tú: ' + texto) : 'No se pudo enviar tu respuesta. Toca para abrir el chat.',
+                icon: d.icon || '/favicon.png',
+                badge: '/favicon.png',
+                tag: d.tag || 'arxechat-message',
+                renotify: false,
+                silent: true,
+                data: { url: d.url || '/', chat_id: d.chat_id || '', title: d.title, icon: d.icon, tag: d.tag }
+            });
+            if (ok) {
+                await new Promise((res) => setTimeout(res, 4000));
+                const lista = await self.registration.getNotifications({ tag: d.tag || 'arxechat-message' });
+                lista.forEach((n) => n.close());
+            }
+        })());
+        return;
+    }
+    notif.close();
+    const targetUrl = d.url || '/';
     event.waitUntil((async () => {
         const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
         for (const client of clientList) {
             if ('focus' in client) {
                 await client.focus();
-                if ('navigate' in client && new URL(client.url).origin === self.location.origin) await client.navigate(targetUrl);
+                // Con la web ya abierta no se recarga: se le pide que abra ese chat.
+                if (d.chat_id) client.postMessage({ type: 'ABRIR_CHAT', id: d.chat_id });
+                else if ('navigate' in client && new URL(client.url).origin === self.location.origin) await client.navigate(targetUrl);
                 return;
             }
         }
@@ -4572,8 +4626,9 @@ def marcar_mensaje_visto(data):
         socketio.emit('mensaje_visto', {'mensaje_id': mensaje_id}, room=fila['emisor'])
         socketio.emit('contactos_cargados', _construir_lista_contactos(lector_id), room=lector_id)
 
-@socketio.on('mensaje_enviado')
-def manejar_mensaje(data):
+def _procesar_mensaje_nuevo(data):
+    # Guarda el mensaje, lo reparte en directo y manda las notificaciones push.
+    # Lo usan tanto el socket (mensaje_enviado) como la respuesta rápida desde una notificación.
     es_grupo = data.get('esGrupo', 0)
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
     
@@ -4607,10 +4662,10 @@ def manejar_mensaje(data):
     }
 
     if es_grupo:
-        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+        socketio.emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
     else:
-        emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
-        emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
+        socketio.emit('recibir_mensaje', nuevo_msg, room=data['emisor'])
+        socketio.emit('recibir_mensaje', nuevo_msg, room=data['receptor'])
 
     if es_grupo:
         push_conn = get_db()
@@ -4640,7 +4695,7 @@ def manejar_mensaje(data):
     push_icon_cursor.close()
     push_icon_conn.close()
     push_icon = fila_foto['foto'] if fila_foto else None
-    if not push_icon or len(push_icon) > 3000:
+    if not push_icon or len(push_icon) > 2000:
         push_icon = None
 
     push_payload = {
@@ -4651,7 +4706,109 @@ def manejar_mensaje(data):
         'icon': push_icon,
     }
     for recipient_id in set(push_recipients):
-        socketio.start_background_task(enviar_push_a_usuario, recipient_id, push_payload)
+        # Cada destinatario recibe su propio botón "Responder" con un permiso que solo vale
+        # para contestar en ESTE chat y durante 24 horas.
+        id_chat_destino = data['receptor'] if es_grupo else data['emisor']
+        payload_dest = dict(push_payload)
+        payload_dest['url'] = '/?abrir=' + str(id_chat_destino)
+        payload_dest['chat_id'] = id_chat_destino
+        payload_dest['reply_token'] = _firmar_token_respuesta(recipient_id, id_chat_destino, bool(es_grupo))
+        payload_dest['actions'] = [{'action': 'reply', 'title': 'Responder', 'type': 'text', 'placeholder': 'Escribe un mensaje...'}]
+        socketio.start_background_task(enviar_push_a_usuario, recipient_id, payload_dest)
+
+@socketio.on('mensaje_enviado')
+def manejar_mensaje(data):
+    _procesar_mensaje_nuevo(data)
+
+# ===== Respuesta rápida desde la notificación =====
+def _secreto_tokens():
+    base = os.environ.get('SECRET_KEY') or os.environ.get('VAPID_PRIVATE_KEY') or os.environ.get('DATABASE_URL') or 'arxechat'
+    return hashlib.sha256(('arxechat-respuesta:' + base).encode('utf-8')).digest()
+
+def _firmar_token_respuesta(usuario_id, chat_id, es_grupo):
+    cuerpo = json.dumps({'u': usuario_id, 'c': chat_id, 'g': 1 if es_grupo else 0, 'e': int(time.time()) + 24 * 3600}, separators=(',', ':'))
+    b = base64.urlsafe_b64encode(cuerpo.encode('utf-8')).decode('ascii').rstrip('=')
+    firma = hmac.new(_secreto_tokens(), b.encode('ascii'), hashlib.sha256).hexdigest()[:32]
+    return b + '.' + firma
+
+def _leer_token_respuesta(token):
+    try:
+        b, firma = str(token).split('.', 1)
+        esperada = hmac.new(_secreto_tokens(), b.encode('ascii'), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(firma, esperada):
+            return None
+        datos = json.loads(base64.urlsafe_b64decode(b + '=' * (-len(b) % 4)).decode('utf-8'))
+        if int(datos.get('e', 0)) < time.time():
+            return None
+        return datos
+    except Exception:
+        return None
+
+_respuestas_por_usuario = {}
+
+@app.route('/api/responder-notificacion', methods=['POST'])
+def responder_desde_notificacion():
+    payload = request.get_json(silent=True) or {}
+    datos = _leer_token_respuesta(payload.get('token'))
+    if not datos:
+        return jsonify({'ok': False, 'error': 'permiso no válido o caducado'}), 401
+    texto = payload.get('texto')
+    if not isinstance(texto, str) or not texto.strip():
+        return jsonify({'ok': False, 'error': 'mensaje vacío'}), 400
+    texto = html_lib.escape(texto.strip()[:4000], quote=False)
+    usuario_id, chat_id, es_grupo = datos['u'], datos['c'], bool(datos['g'])
+
+    ahora = time.time()
+    recientes = [t for t in _respuestas_por_usuario.get(usuario_id, []) if ahora - t < 60]
+    if len(recientes) >= 20:
+        return jsonify({'ok': False, 'error': 'demasiados mensajes seguidos'}), 429
+    recientes.append(ahora)
+    _respuestas_por_usuario[usuario_id] = recientes
+
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT nombre FROM usuarios WHERE id = %s", (usuario_id,))
+        yo = cursor.fetchone()
+        if not yo:
+            cursor.close()
+            return jsonify({'ok': False, 'error': 'usuario no existe'}), 404
+        nombre_grupo = None
+        if es_grupo:
+            cursor.execute("SELECT g.nombre FROM grupos g JOIN miembros_grupo mg ON mg.grupo_id = g.id WHERE g.id = %s AND mg.usuario_id = %s", (chat_id, usuario_id))
+            fila_g = cursor.fetchone()
+            if not fila_g:
+                cursor.close()
+                return jsonify({'ok': False, 'error': 'ya no estás en ese grupo'}), 403
+            nombre_grupo = fila_g['nombre']
+            clave_chat = chat_id
+        else:
+            cursor.execute("SELECT 1 FROM usuarios WHERE id = %s", (chat_id,))
+            if not cursor.fetchone():
+                cursor.close()
+                return jsonify({'ok': False, 'error': 'ese contacto ya no existe'}), 404
+            clave_chat = "_".join(sorted([usuario_id, chat_id]))
+        # Contestar cuenta como haber leído lo que te habían escrito en ese chat.
+        cursor.execute("""
+            UPDATE mensajes SET leido = 1, visto_en_pantalla = TRUE
+            WHERE clave_chat = %s AND emisor != %s AND (leido = 0 OR visto_en_pantalla = FALSE)
+            RETURNING id, emisor
+        """, (clave_chat, usuario_id))
+        leidos = cursor.fetchall()
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+
+    for r in leidos:
+        socketio.emit('mensaje_visto', {'mensaje_id': r['id']}, room=r['emisor'])
+    _procesar_mensaje_nuevo({
+        'emisor': usuario_id, 'receptor': chat_id, 'esGrupo': 1 if es_grupo else 0,
+        'texto': texto, 'nombreEmisor': yo['nombre'], 'nombreGrupo': nombre_grupo,
+    })
+    if leidos:
+        socketio.emit('contactos_cargados', _construir_lista_contactos(usuario_id), room=usuario_id)
+    return jsonify({'ok': True})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
