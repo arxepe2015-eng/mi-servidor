@@ -3394,7 +3394,7 @@ HTML_LAYOUT = """
 @app.route('/service-worker.js')
 def service_worker():
     js = r"""
-const ARXECHAT_SW_VERSION = '2026-10-18-responder-v1';
+const ARXECHAT_SW_VERSION = '2026-10-25-responder-v2';
 self.addEventListener('push', (event) => {
     let data = {};
     try { data = event.data ? event.data.json() : {}; }
@@ -3444,6 +3444,14 @@ self.addEventListener('notificationclick', (event) => {
                 lista.forEach((n) => n.close());
             }
         })());
+        return;
+    }
+    // Ordenador: el navegador no deja escribir dentro de la notificación, así que "Responder"
+    // abre una ventanita con solo la caja para escribir.
+    if (event.action === 'reply' && !event.reply && d.token) {
+        notif.close();
+        const frag = '#t=' + encodeURIComponent(d.token) + '&n=' + encodeURIComponent(d.title || '') + '&c=' + encodeURIComponent(d.chat_id || '');
+        event.waitUntil(clients.openWindow('/responder' + frag));
         return;
     }
     notif.close();
@@ -4745,6 +4753,61 @@ def _leer_token_respuesta(token):
         return None
 
 _respuestas_por_usuario = {}
+
+RESPONDER_HTML = r"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex"><link rel="icon" type="image/png" href="/favicon.png">
+<title>Responder - Arxechat</title>
+<style>
+:root{--bg:#f0f2f5;--card:#fff;--txt:#111b21;--sub:#667781;--in:#f0f2f5;--ac:#008069;--bd:#d1d7db}
+@media (prefers-color-scheme:dark){:root{--bg:#0b141a;--card:#111b21;--txt:#e9edef;--sub:#8696a0;--in:#202c33;--ac:#00a884;--bd:#2a3942}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:12px}
+.box{width:100%;max-width:420px;background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:18px}
+h1{font-size:1.05rem;margin:0 0 4px;color:var(--ac)} p{margin:0 0 10px;color:var(--sub);font-size:.85rem}
+textarea{width:100%;height:96px;resize:none;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--in);color:var(--txt);font:inherit;outline:none}
+.fila{display:flex;gap:8px;margin-top:10px;align-items:center}
+button{flex:1;padding:11px;border:0;border-radius:8px;background:var(--ac);color:#fff;font-weight:700;font-size:1rem;cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+a{color:var(--ac);font-size:.85rem;white-space:nowrap}
+#estado{margin-top:10px;min-height:1.2em;font-size:.9rem}
+.ok{color:var(--ac)} .mal{color:#ea4335}
+</style></head><body><div class="box">
+<h1 id="tit">Responder</h1>
+<p>Escribe tu respuesta. Se enviará sin abrir Arxechat.</p>
+<textarea id="txt" placeholder="Escribe un mensaje..." autofocus></textarea>
+<div class="fila"><button type="button" id="env">Enviar</button><a id="abrir" href="/" target="_blank" rel="noopener">Abrir el chat</a></div>
+<div id="estado"></div>
+</div>
+<script>
+var p=new URLSearchParams(location.hash.slice(1));
+var token=p.get('t')||'', nombre=p.get('n')||'', chat=p.get('c')||'';
+document.getElementById('tit').textContent=nombre?('Responder · '+nombre):'Responder';
+if(chat){document.getElementById('abrir').href='/?abrir='+encodeURIComponent(chat);}
+var env=document.getElementById('env'), txt=document.getElementById('txt'), est=document.getElementById('estado');
+function mostrar(t,ok){est.textContent=t;est.className=ok?'ok':'mal';}
+function enviar(){
+  var v=txt.value.trim();
+  if(!token){mostrar('Este enlace no es válido. Abre el chat.',false);return;}
+  if(!v){mostrar('Escribe algo primero.',false);return;}
+  env.disabled=true;mostrar('Enviando...',true);
+  fetch('/api/responder-notificacion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token,texto:v})})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+  .then(function(x){
+    if(x.ok){txt.value='';txt.disabled=true;mostrar('✓ Enviado. Ya puedes cerrar esta ventana.',true);setTimeout(function(){try{window.close();}catch(e){}},900);}
+    else{env.disabled=false;mostrar(x.d&&x.d.error?('No se pudo enviar: '+x.d.error):'No se pudo enviar.',false);}
+  }).catch(function(){env.disabled=false;mostrar('Sin conexión. Inténtalo de nuevo.',false);});
+}
+env.addEventListener('click',enviar);
+txt.addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();enviar();}});
+</script></body></html>"""
+
+@app.route('/responder')
+def pagina_responder():
+    resp = Response(RESPONDER_HTML, mimetype='text/html')
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
 
 @app.route('/api/responder-notificacion', methods=['POST'])
 def responder_desde_notificacion():
