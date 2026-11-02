@@ -6,6 +6,7 @@ import datetime
 import re
 import hmac
 import hashlib
+import urllib.parse
 import time
 import html as html_lib
 import psycopg2
@@ -3573,6 +3574,63 @@ def manifest():
         ]
     })
 
+def _firma_icono(tipo, id_):
+    return hmac.new(_secreto_tokens(), ('icono:' + tipo + ':' + str(id_)).encode('utf-8'), hashlib.sha256).hexdigest()[:16]
+
+def _url_icono_chat(tipo, id_, foto):
+    version = hashlib.sha1(foto.encode('utf-8')).hexdigest()[:10]
+    return '/icono-chat/' + tipo + '/' + urllib.parse.quote(str(id_), safe='') + '/' + _firma_icono(tipo, id_) + '.png?v=' + version
+
+_cache_iconos = {}
+
+@app.route('/icono-chat/<tipo>/<id_>/<firma>.png')
+def icono_chat(tipo, id_, firma):
+    if tipo not in ('u', 'g') or not hmac.compare_digest(firma, _firma_icono(tipo, id_)):
+        return Response(ARXECHAT_LOGO_BYTES, mimetype='image/png')
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT foto FROM " + ("grupos" if tipo == 'g' else "usuarios") + " WHERE id = %s", (id_,))
+    fila = cur.fetchone()
+    cur.close()
+    conn.close()
+    foto = fila['foto'] if fila else None
+    cabeceras = {'Cache-Control': 'public, max-age=86400'}
+    if not foto or not str(foto).startswith('data:image') or ',' not in foto:
+        return Response(ARXECHAT_LOGO_BYTES, mimetype='image/png', headers=cabeceras)
+    clave = hashlib.sha1(foto.encode('utf-8')).hexdigest()
+    if clave in _cache_iconos:
+        return Response(_cache_iconos[clave], mimetype='image/png', headers=cabeceras)
+    try:
+        crudo = base64.b64decode(foto.split(',', 1)[1])
+    except Exception:
+        return Response(ARXECHAT_LOGO_BYTES, mimetype='image/png', headers=cabeceras)
+    try:
+        from PIL import Image, ImageDraw
+        import io
+        im = Image.open(io.BytesIO(crudo)).convert('RGBA')
+        lado = min(im.size)
+        izq, arr = (im.width - lado) // 2, (im.height - lado) // 2
+        im = im.crop((izq, arr, izq + lado, arr + lado)).resize((256, 256))
+        logo = Image.open(io.BytesIO(ARXECHAT_LOGO_BYTES)).convert('RGBA').resize((88, 88))
+        mascara = Image.new('L', (88, 88), 0)
+        ImageDraw.Draw(mascara).ellipse((0, 0, 87, 87), fill=255)
+        logo.putalpha(mascara)
+        disco = Image.new('RGBA', (104, 104), (0, 0, 0, 0))
+        ImageDraw.Draw(disco).ellipse((0, 0, 103, 103), fill=(255, 255, 255, 255))
+        im.alpha_composite(disco, (256 - 108, 256 - 108))
+        im.alpha_composite(logo, (256 - 100, 256 - 100))
+        salida = io.BytesIO()
+        im.save(salida, 'PNG')
+        datos = salida.getvalue()
+        if len(_cache_iconos) > 200:
+            _cache_iconos.clear()
+        _cache_iconos[clave] = datos
+        return Response(datos, mimetype='image/png', headers=cabeceras)
+    except Exception as e:
+        # Sin Pillow (o imagen rara): se manda la foto tal cual, sin logo en la esquina.
+        mime = foto.split(';', 1)[0][5:] or 'image/png'
+        return Response(crudo, mimetype=mime, headers=cabeceras)
+
 @app.route('/favicon.png')
 def favicon_png():
     return Response(ARXECHAT_LOGO_BYTES, mimetype='image/png', headers={
@@ -4696,14 +4754,26 @@ def _procesar_mensaje_nuevo(data):
     elif push_body.startswith('📁 <a'):
         push_body = '📁 Archivo adjunto'
 
-    push_icon_conn = get_db()
-    push_icon_cursor = push_icon_conn.cursor()
-    push_icon_cursor.execute("SELECT foto FROM usuarios WHERE id = %s", (data['emisor'],))
-    fila_foto = push_icon_cursor.fetchone()
-    push_icon_cursor.close()
-    push_icon_conn.close()
-    push_icon = fila_foto['foto'] if fila_foto else None
-    if not push_icon or len(push_icon) > 2000:
+    # Icono de la notificación: foto del grupo (si es grupo) o de quien escribe, con el logo
+    # de Arxechat pequeño en la esquina. Se sirve desde /icono-chat/... (ver más abajo).
+    push_icon = None
+    try:
+        push_icon_conn = get_db()
+        push_icon_cursor = push_icon_conn.cursor()
+        if es_grupo:
+            push_icon_cursor.execute("SELECT foto FROM grupos WHERE id = %s", (data['receptor'],))
+            tipo_icono, id_icono = 'g', data['receptor']
+        else:
+            push_icon_cursor.execute("SELECT foto FROM usuarios WHERE id = %s", (data['emisor'],))
+            tipo_icono, id_icono = 'u', data['emisor']
+        fila_foto = push_icon_cursor.fetchone()
+        push_icon_cursor.close()
+        push_icon_conn.close()
+        foto_icono = fila_foto['foto'] if fila_foto else None
+        if foto_icono and str(foto_icono).startswith('data:image'):
+            push_icon = _url_icono_chat(tipo_icono, id_icono, foto_icono)
+    except Exception as e:
+        print('Aviso: no se pudo preparar el icono de la notificación:', e)
         push_icon = None
 
     push_payload = {
