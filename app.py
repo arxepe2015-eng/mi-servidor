@@ -580,6 +580,7 @@ HTML_LAYOUT = """
     </style>
 </head>
 <body>
+    <div id="avisoConexion" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#f59e0b;color:#111;text-align:center;padding:6px 10px;font-size:.85rem;font-weight:700;">Reconectando...</div>
 
     <div class="modal-overlay" id="authModal" style="display:none;">
         <div class="modal-box">
@@ -896,7 +897,21 @@ HTML_LAYOUT = """
         const socket = io();
         let esPrimeraConexion = true;
 
+        let temporizadorAviso = null;
+        function mostrarAvisoConexion() {
+            if (temporizadorAviso) return;
+            temporizadorAviso = setTimeout(() => {
+                const a = document.getElementById('avisoConexion');
+                if (a) a.style.display = 'block';
+            }, 1500);
+        }
+        function ocultarAvisoConexion() {
+            if (temporizadorAviso) { clearTimeout(temporizadorAviso); temporizadorAviso = null; }
+            const a = document.getElementById('avisoConexion');
+            if (a) a.style.display = 'none';
+        }
         socket.on('connect', () => {
+            ocultarAvisoConexion();
             if (esPrimeraConexion) {
                 esPrimeraConexion = false;
                 return; // el primer login/carga ya hace todo esto en iniciarApp()
@@ -920,7 +935,7 @@ HTML_LAYOUT = """
             alert('Error JS detectado: ' + e.message + ' (línea ' + e.lineno + ')');
         });
         socket.on('connect_error', (err) => {
-            alert('Error de conexión con el servidor: ' + err.message);
+            mostrarAvisoConexion();
         });
         let isRegister = false;
         let miUsuario = null;
@@ -1105,7 +1120,7 @@ HTML_LAYOUT = """
                 socket.emit('mensaje_enviado', colaEnvio.shift());
             }
         }
-        socket.on('disconnect', () => { identificado = false; });
+        socket.on('disconnect', () => { identificado = false; mostrarAvisoConexion(); });
 
         const cacheFotosUsuario = {};
         let misContactos = [];
