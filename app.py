@@ -619,7 +619,7 @@ HTML_LAYOUT = """
 
     <div class="modal-overlay" id="compartirModal" style="display:none;">
         <div class="modal-box" style="text-align:left;">
-            <h2 style="text-align:center;">Compartir en Arxechat</h2>
+            <h2 style="text-align:center;" id="compartirTitulo">Compartir en Arxechat</h2>
             <div id="compartirPreview" style="background: var(--bg-input); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 0.9rem; max-height: 140px; overflow-y: auto; word-break: break-word;"></div>
             <input type="text" id="compartirFiltro" placeholder="Buscar chat o grupo" oninput="pintarListaCompartir()">
             <div id="compartirLista" style="max-height: 38vh; overflow-y: auto; margin-top: 4px;"></div>
@@ -715,6 +715,24 @@ HTML_LAYOUT = """
         </div>
     </div>
 
+    <div class="modal-overlay" id="copiarModal" style="display:none;z-index:1100;" onclick="if(event.target===this)cerrarCopiar()">
+        <div class="modal-box">
+            <h3 style="margin-top:0;">Copiar mensaje</h3>
+            <button type="button" class="btn-action" onclick="copiarTodoMensaje()">Copiar todo</button>
+            <button type="button" class="btn-action" onclick="abrirSeleccionTexto()">Seleccionar lo que quiero copiar</button>
+            <button type="button" class="btn-action" style="background:#202c33;border:1px solid var(--accent);color:var(--accent);" onclick="cerrarCopiar()">Cancelar</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="seleccionModal" style="display:none;z-index:1100;">
+        <div class="modal-box" style="text-align:left;">
+            <h3 style="margin-top:0;text-align:center;">Selecciona el texto</h3>
+            <textarea id="seleccionTexto" readonly style="width:100%;height:42vh;font-size:1.25rem;line-height:1.4;padding:12px;border-radius:8px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-main);resize:none;"></textarea>
+            <button type="button" class="btn-action" onclick="copiarSeleccion()">Copiar selección</button>
+            <button type="button" class="btn-action" style="background:#202c33;border:1px solid var(--accent);color:var(--accent);" onclick="cerrarSeleccion()">Cancelar</button>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="quienVistoModal" style="display:none;" onclick="if(event.target===this)cerrarQuienHaVisto()">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarQuienHaVisto()">&times;</span>
@@ -724,8 +742,11 @@ HTML_LAYOUT = """
     </div>
 
     <div class="message-context-menu" id="messageContextMenu">
-        <button type="button" onclick="iniciarEdicionMensaje()">Editar mensaje</button>
-        <button type="button" class="delete" onclick="eliminarMensajeSeleccionado()">Eliminar mensaje</button>
+        <button type="button" id="menuBtnReenviar" onclick="reenviarMensajeSeleccionado()">Reenviar</button>
+        <button type="button" id="menuBtnCopiar" onclick="copiarMensajeSeleccionado()">Copiar</button>
+        <button type="button" id="menuBtnInfo" onclick="infoMensajeSeleccionado()">Información (quién lo ha visto)</button>
+        <button type="button" id="menuBtnEditar" onclick="iniciarEdicionMensaje()">Editar mensaje</button>
+        <button type="button" id="menuBtnEliminar" class="delete" onclick="eliminarMensajeSeleccionado()">Eliminar mensaje</button>
     </div>
 
     <div class="modal-overlay" id="settingsModal" style="display:none;">
@@ -2645,6 +2666,15 @@ HTML_LAYOUT = """
             mensajeSeleccionadoParaEliminar = String(messageId);
             const menu = document.getElementById('messageContextMenu');
             if (!menu) return;
+            const msgSel = cacheMensajes[messageId];
+            const esMio = !!(msgSel && miUsuario && msgSel.emisor === miUsuario.id);
+            const esTexto = !!(msgSel && !(msgSel.texto && (msgSel.texto.startsWith('<img') || msgSel.texto.startsWith('📁 <a'))));
+            const ver = (id, v) => { const b = document.getElementById(id); if (b) b.style.display = v ? 'block' : 'none'; };
+            ver('menuBtnReenviar', !!msgSel);
+            ver('menuBtnCopiar', esTexto);
+            ver('menuBtnInfo', esMio && !!(contactoActivo && contactoActivo.esGrupo));
+            ver('menuBtnEditar', esMio);
+            ver('menuBtnEliminar', esMio);
             menu.style.display = 'block';
             const margin = 8;
             const rect = menu.getBoundingClientRect();
@@ -2654,6 +2684,77 @@ HTML_LAYOUT = """
             if (top + rect.height + margin > window.innerHeight) top = window.innerHeight - rect.height - margin;
             menu.style.left = Math.max(margin, left) + 'px';
             menu.style.top = Math.max(margin, top) + 'px';
+        }
+
+        function textoPlanoDeMensaje(texto) {
+            const t = document.createElement('textarea');
+            t.innerHTML = String(texto || '');
+            return t.value;
+        }
+
+        function reenviarMensajeSeleccionado() {
+            const id = mensajeSeleccionadoParaEliminar;
+            cerrarMenuMensaje();
+            const msg = id ? cacheMensajes[id] : null;
+            if (!msg) return;
+            compartidoPendiente = { titulo: '', texto: '', url: '', archivos: [], _raw: msg.texto || '' };
+            mostrarCompartir();
+        }
+
+        function infoMensajeSeleccionado() {
+            const id = mensajeSeleccionadoParaEliminar;
+            cerrarMenuMensaje();
+            if (id) abrirQuienHaVisto(Number(id));
+        }
+
+        let textoParaCopiar = '';
+        function copiarMensajeSeleccionado() {
+            const id = mensajeSeleccionadoParaEliminar;
+            cerrarMenuMensaje();
+            const msg = id ? cacheMensajes[id] : null;
+            if (!msg) return;
+            textoParaCopiar = textoPlanoDeMensaje(msg.texto);
+            document.getElementById('copiarModal').style.display = 'flex';
+        }
+        function cerrarCopiar() { document.getElementById('copiarModal').style.display = 'none'; }
+        function copiarAlPortapapeles(texto) {
+            const alternativa = () => {
+                const ta = document.createElement('textarea');
+                ta.value = texto;
+                ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+                document.body.appendChild(ta);
+                ta.focus(); ta.select();
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                document.body.removeChild(ta);
+                return ok;
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(texto).then(() => true).catch(() => alternativa());
+            }
+            return Promise.resolve(alternativa());
+        }
+        function copiarTodoMensaje() {
+            copiarAlPortapapeles(textoParaCopiar).then((ok) => {
+                cerrarCopiar();
+                if (!ok) alert('No se pudo copiar. Prueba con "Seleccionar lo que quiero copiar".');
+            });
+        }
+        function abrirSeleccionTexto() {
+            cerrarCopiar();
+            const ta = document.getElementById('seleccionTexto');
+            ta.value = textoParaCopiar;
+            document.getElementById('seleccionModal').style.display = 'flex';
+            ta.scrollTop = 0;
+        }
+        function cerrarSeleccion() { document.getElementById('seleccionModal').style.display = 'none'; }
+        function copiarSeleccion() {
+            const ta = document.getElementById('seleccionTexto');
+            const ini = ta.selectionStart, fin = ta.selectionEnd;
+            if (ini === fin) { alert('Primero selecciona el texto que quieres copiar (mantén pulsado sobre él).'); return; }
+            copiarAlPortapapeles(ta.value.substring(ini, fin)).then((ok) => {
+                if (ok) cerrarSeleccion(); else alert('No se pudo copiar.');
+            });
         }
 
         function eliminarMensajeSeleccionado() {
@@ -2666,7 +2767,7 @@ HTML_LAYOUT = """
         }
 
         function instalarEventosMensaje(rowDiv, msgElement, messageId) {
-            if (!messageId || rowDiv.classList.contains('received')) return;
+            if (!messageId) return;
             msgElement.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
                 mostrarMenuMensaje(messageId, e.clientX, e.clientY);
@@ -2784,7 +2885,7 @@ HTML_LAYOUT = """
             
             rowDiv.innerHTML = avatarHtml + '<span class="reply-icon">↩️</span>';
             rowDiv.appendChild(msgElement);
-            if (esMio && msg.id !== undefined && msg.id !== null) instalarEventosMensaje(rowDiv, msgElement, msg.id);
+            if (msg.id !== undefined && msg.id !== null) instalarEventosMensaje(rowDiv, msgElement, msg.id);
             if (!esMio && !contactoActivo.esGrupo && msg.id !== undefined && msg.id !== null && msg.visto_en_pantalla !== true) {
                 observarVisibilidadMensaje(rowDiv, msg.id);
             } else if (!esMio && contactoActivo.esGrupo && msg.id !== undefined && msg.id !== null && msg.visto_por_mi !== true) {
@@ -3277,6 +3378,22 @@ HTML_LAYOUT = """
         function mostrarCompartir() {
             if (!compartidoPendiente) return;
             const it = compartidoPendiente;
+            const tituloModal = document.getElementById('compartirTitulo');
+            if (tituloModal) tituloModal.textContent = (it._raw !== undefined) ? 'Reenviar mensaje' : 'Compartir en Arxechat';
+            if (it._raw !== undefined) {
+                textoCompartido = '';
+                const prevR = document.getElementById('compartirPreview');
+                prevR.innerHTML = '';
+                const dR = document.createElement('div');
+                dR.innerHTML = formatearTextoConLinks(it._raw);
+                dR.querySelectorAll('img').forEach((im) => { im.style.maxHeight = '90px'; });
+                prevR.appendChild(dR);
+                document.getElementById('compartirFiltro').value = '';
+                compartirSeleccion = new Set();
+                pintarListaCompartir();
+                document.getElementById('compartirModal').style.display = 'flex';
+                return;
+            }
             textoCompartido = construirTextoCompartido(it);
             const prev = document.getElementById('compartirPreview');
             prev.innerHTML = '';
@@ -3387,7 +3504,8 @@ HTML_LAYOUT = """
             const it = compartidoPendiente;
             const contenidos = [];
             const rechazados = [];
-            if (textoCompartido) contenidos.push(escHtmlCompartir(textoCompartido));
+            if (it._raw !== undefined) contenidos.push(it._raw);
+            else if (textoCompartido) contenidos.push(escHtmlCompartir(textoCompartido));
             for (const f of (it.archivos || [])) {
                 if (f.size > 8 * 1024 * 1024) { rechazados.push((f.name || 'archivo') + ' (más de 8 MB)'); continue; }
                 try {
