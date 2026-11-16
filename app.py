@@ -396,6 +396,7 @@ HTML_LAYOUT = """
 <html lang="es">
 <head>
     <meta charset="UTF-8">
+    <meta name="google-site-verification" content="wGjP2V2leY-mXZ5JyLAvWNo9TLzb9IKNwJt15ckhPu4" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Arxechat</title>
     <meta name="description" content="Es una plataforma de mensajes creada por Arxe. Chatea de forma rápida y sencilla con conversaciones privadas y grupos.">
