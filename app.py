@@ -476,6 +476,9 @@ HTML_LAYOUT = """
         .compartir-fila .compartir-nombre { flex: 1; min-width: 0; color: var(--text-main); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .forwarded-label { display: block; font-size: .75rem; font-style: italic; opacity: .75; margin-bottom: 3px; }
         .tick-grupo { cursor: pointer; }
+        @keyframes parpadeoMensaje { 0%, 100% { filter: none; box-shadow: 0 0 0 0 transparent; } 20%, 60% { filter: brightness(1.7); box-shadow: 0 0 0 3px var(--accent); } 40%, 80% { filter: none; box-shadow: 0 0 0 0 transparent; } }
+        .msg-flash { animation: parpadeoMensaje 2.6s ease-in-out 1; }
+        #avisoBreve { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); z-index: 99998; background: rgba(0,0,0,.85); color: #fff; padding: 9px 16px; border-radius: 18px; font-size: .88rem; display: none; max-width: 85%; text-align: center; }
         .tick-grupo small { font-size: .7em; margin-left: 2px; }
         .qv-titulo { font-weight: 700; margin: 12px 0 4px; color: var(--accent); }
         .qv-fila { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(128,128,128,.25); }
@@ -2876,7 +2879,10 @@ HTML_LAYOUT = """
             const respondeANombre = respondeAEmisorId === miUsuario.id ? 'Tú' : respondeANombreOriginal;
             let quotedHtml = '';
             if (respondeATexto || respondeANombre) {
-                quotedHtml = `<div class="quoted-reply"><span class="quoted-sender">${respondeANombre || 'Mensaje'}</span><span class="quoted-texto">${snippetDeMensaje(respondeATexto)}</span></div>`;
+                const refId = msg.responde_a_id ?? msg.respondeAId;
+                const refAttr = (refId !== undefined && refId !== null && refId !== '' && !Number.isNaN(Number(refId)))
+                    ? ` style="cursor:pointer;" onclick="irAlMensaje(${Number(refId)})"` : '';
+                quotedHtml = `<div class="quoted-reply"${refAttr}><span class="quoted-sender">${respondeANombre || 'Mensaje'}</span><span class="quoted-texto">${snippetDeMensaje(respondeATexto)}</span></div>`;
             }
 
             const rawFecha = msg.fecha || new Date().toISOString();
@@ -3164,6 +3170,55 @@ HTML_LAYOUT = """
             if (miUsuario && contactoActivo) cacheGuardar(kChat(contactoActivo.id), { mensajes: recortarParaCache(data.mensajes), hay_mas: data.hay_mas });
         });
 
+        // Ir al mensaje original al tocar una cita ("respondiendo a...") y hacerlo parpadear.
+        let objetivoSalto = null;
+        let temporizadorAvisoBreve = null;
+        function mostrarAvisoBreve(texto) {
+            let a = document.getElementById('avisoBreve');
+            if (!a) { a = document.createElement('div'); a.id = 'avisoBreve'; document.body.appendChild(a); }
+            a.textContent = texto;
+            a.style.display = 'block';
+            clearTimeout(temporizadorAvisoBreve);
+            temporizadorAvisoBreve = setTimeout(() => { a.style.display = 'none'; }, 2600);
+        }
+        function parpadearMensaje(fila) {
+            const burbuja = fila.querySelector('.message') || fila;
+            burbuja.classList.remove('msg-flash');
+            void burbuja.offsetWidth;
+            burbuja.classList.add('msg-flash');
+            setTimeout(() => burbuja.classList.remove('msg-flash'), 2800);
+        }
+        function filaDeMensaje(id) {
+            return document.querySelector('#messages .msg-row[data-message-id="' + id + '"]');
+        }
+        function pedirMasParaSalto() {
+            const messagesDiv = document.getElementById('messages');
+            const primerMsg = messagesDiv.querySelector('.msg-row');
+            if (!primerMsg || !primerMsg.dataset.fecha || !contactoActivo) { objetivoSalto = null; mostrarAvisoBreve('El mensaje original ya no está disponible.'); return; }
+            cargandoMasHistorial = true;
+            socket.emit('cargar_mas_historial', {
+                emisor: miUsuario.id,
+                receptor: contactoActivo.id,
+                esGrupo: contactoActivo.esGrupo,
+                antes_de_fecha: primerMsg.dataset.fecha,
+            });
+        }
+        function irAlMensaje(id) {
+            const fila = filaDeMensaje(id);
+            if (fila) {
+                fila.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                parpadearMensaje(fila);
+                return;
+            }
+            if (hayMasHistorial && contactoActivo && !cargandoMasHistorial) {
+                objetivoSalto = { id: id, intentos: 0 };
+                mostrarAvisoBreve('Buscando el mensaje...');
+                pedirMasParaSalto();
+            } else {
+                mostrarAvisoBreve('El mensaje original ya no está disponible.');
+            }
+        }
+
         socket.on('mas_historial_cargado', (data) => {
             const messagesDiv = document.getElementById('messages');
             hayMasHistorial = data.hay_mas;
@@ -3176,6 +3231,21 @@ HTML_LAYOUT = """
             // Mantener la posición visual: si no lo hacemos, al insertar arriba
             // la pantalla "salta" porque de repente hay más contenido encima.
             messagesDiv.scrollTop += (messagesDiv.scrollHeight - altoAntes);
+            if (objetivoSalto) {
+                const filaObj = filaDeMensaje(objetivoSalto.id);
+                if (filaObj) {
+                    const idEncontrado = objetivoSalto.id;
+                    objetivoSalto = null;
+                    filaObj.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    parpadearMensaje(filaObj);
+                } else if (hayMasHistorial && objetivoSalto.intentos < 25) {
+                    objetivoSalto.intentos += 1;
+                    pedirMasParaSalto();
+                } else {
+                    objetivoSalto = null;
+                    mostrarAvisoBreve('El mensaje original ya no está disponible.');
+                }
+            }
         });
 
         document.getElementById('messages').addEventListener('scroll', () => {
