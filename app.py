@@ -268,6 +268,7 @@ def init_db():
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_texto TEXT")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_nombre TEXT")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_emisor_id TEXT")
+    cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS reenviado_de TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_contactos_mi_id ON contactos (mi_id, contacto_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_miembros_grupo_usuario ON miembros_grupo (usuario_id, grupo_id)")
 
@@ -473,6 +474,7 @@ HTML_LAYOUT = """
         .orden-fila.arrastrando { background: var(--bg-input); box-shadow: 0 4px 14px rgba(0,0,0,0.35); position: relative; z-index: 2; }
         .modal-box .compartir-fila input[type="checkbox"] { width: 22px; height: 22px; min-width: 22px; padding: 0; margin: 0; flex: 0 0 22px; accent-color: var(--accent); background: transparent; }
         .compartir-fila .compartir-nombre { flex: 1; min-width: 0; color: var(--text-main); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .forwarded-label { display: block; font-size: .75rem; font-style: italic; opacity: .75; margin-bottom: 3px; }
         .tick-grupo { cursor: pointer; }
         .tick-grupo small { font-size: .7em; margin-left: 2px; }
         .qv-titulo { font-weight: 700; margin: 12px 0 4px; color: var(--accent); }
@@ -2697,7 +2699,9 @@ HTML_LAYOUT = """
             cerrarMenuMensaje();
             const msg = id ? cacheMensajes[id] : null;
             if (!msg) return;
-            compartidoPendiente = { titulo: '', texto: '', url: '', archivos: [], _raw: msg.texto || '' };
+            const origen = msg.reenviado_de ?? msg.reenviadoDe;
+            const nombreOriginal = origen || ((miUsuario && msg.emisor !== miUsuario.id) ? (msg.nombreemisor || msg.nombreEmisor || 'Usuario') : null);
+            compartidoPendiente = { titulo: '', texto: '', url: '', archivos: [], _raw: msg.texto || '', _reenviadoDe: nombreOriginal };
             mostrarCompartir();
         }
 
@@ -2859,6 +2863,13 @@ HTML_LAYOUT = """
                 senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
             }
 
+            const reenviadoDe = msg.reenviado_de ?? msg.reenviadoDe;
+            if (reenviadoDe) {
+                const etiq = document.createElement('span');
+                etiq.textContent = '↪ Reenviado de ' + reenviadoDe;
+                senderHeader += `<span class="forwarded-label">${etiq.innerHTML}</span>`;
+            }
+
             const respondeATexto = msg.responde_a_texto ?? msg.respondeATexto;
             const respondeAEmisorId = msg.responde_a_emisor_id ?? msg.respondeAEmisorId;
             const respondeANombreOriginal = msg.responde_a_nombre ?? msg.respondeANombre;
@@ -2977,7 +2988,8 @@ HTML_LAYOUT = """
             const timeEl = msgEl.querySelector('.message-time');
             const timeHtml = timeEl ? timeEl.outerHTML : '';
             const senderEl = msgEl.querySelector('.sender-name');
-            const senderHtml = senderEl ? senderEl.outerHTML : '';
+            const fwdEl = msgEl.querySelector('.forwarded-label');
+            const senderHtml = (senderEl ? senderEl.outerHTML : '') + (fwdEl ? fwdEl.outerHTML : '');
             const quotedEl = msgEl.querySelector('.quoted-reply');
             const quotedHtml = quotedEl ? quotedEl.outerHTML : '';
             msgEl.innerHTML = `${senderHtml}${quotedHtml}${formatearTextoConLinks(nuevoTexto)}${timeHtml}`;
@@ -3480,7 +3492,7 @@ HTML_LAYOUT = """
             });
         }
 
-        function enviarContenidoA(c, texto) {
+        function enviarContenidoA(c, texto, reenviadoDe) {
             const tempId = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2);
             const msg = {
                 emisor: miUsuario.id,
@@ -3491,6 +3503,7 @@ HTML_LAYOUT = """
                 nombreGrupo: c.esGrupo ? c.nombre : undefined,
                 tempId: tempId
             };
+            if (reenviadoDe) msg.reenviadoDe = reenviadoDe;
             if (contactoActivo && contactoActivo.id === c.id) renderizarMensaje(msg, tempId);
             emitirMensaje(msg);
         }
@@ -3524,7 +3537,7 @@ HTML_LAYOUT = """
             const destinos = misContactos.filter((c) => compartirSeleccion.has(c.id));
             if (contenidos.length > 0) {
                 for (const c of destinos) {
-                    for (const texto of contenidos) enviarContenidoA(c, texto);
+                    for (const texto of contenidos) enviarContenidoA(c, texto, it._reenviadoDe || null);
                 }
             }
             btn.disabled = false;
@@ -4812,13 +4825,13 @@ def cargar_historial(data):
 
     if es_grupo:
         cursor.execute("""
-            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, (SELECT COUNT(*) FROM vistos_grupo v WHERE v.mensaje_id = mensajes.id) AS vistos_n, (SELECT COUNT(*) FROM miembros_grupo g WHERE g.grupo_id = mensajes.receptor AND g.usuario_id != mensajes.emisor) AS total_n, EXISTS(SELECT 1 FROM vistos_grupo v2 WHERE v2.mensaje_id = mensajes.id AND v2.usuario_id = %s) AS visto_por_mi
+            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, reenviado_de, (SELECT COUNT(*) FROM vistos_grupo v WHERE v.mensaje_id = mensajes.id) AS vistos_n, (SELECT COUNT(*) FROM miembros_grupo g WHERE g.grupo_id = mensajes.receptor AND g.usuario_id != mensajes.emisor) AS total_n, EXISTS(SELECT 1 FROM vistos_grupo v2 WHERE v2.mensaje_id = mensajes.id AND v2.usuario_id = %s) AS visto_por_mi
             FROM mensajes WHERE clave_chat = %s ORDER BY fecha DESC LIMIT %s
         """, (mi_id, clave_chat, LIMITE_HISTORIAL))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id, m.reenviado_de
             FROM mensajes m
             WHERE m.clave_chat = %s
               AND m.fecha > COALESCE(
@@ -4857,12 +4870,12 @@ def cargar_mas_historial(data):
     cursor = conn.cursor()
     if es_grupo:
         cursor.execute("""
-            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, (SELECT COUNT(*) FROM vistos_grupo v WHERE v.mensaje_id = mensajes.id) AS vistos_n, (SELECT COUNT(*) FROM miembros_grupo g WHERE g.grupo_id = mensajes.receptor AND g.usuario_id != mensajes.emisor) AS total_n, EXISTS(SELECT 1 FROM vistos_grupo v2 WHERE v2.mensaje_id = mensajes.id AND v2.usuario_id = %s) AS visto_por_mi
+            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, reenviado_de, (SELECT COUNT(*) FROM vistos_grupo v WHERE v.mensaje_id = mensajes.id) AS vistos_n, (SELECT COUNT(*) FROM miembros_grupo g WHERE g.grupo_id = mensajes.receptor AND g.usuario_id != mensajes.emisor) AS total_n, EXISTS(SELECT 1 FROM vistos_grupo v2 WHERE v2.mensaje_id = mensajes.id AND v2.usuario_id = %s) AS visto_por_mi
             FROM mensajes WHERE clave_chat = %s AND fecha < %s ORDER BY fecha DESC LIMIT %s
         """, (mi_id, clave_chat, antes_de, LIMITE_HISTORIAL))
     else:
         cursor.execute("""
-            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
+            SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id, m.reenviado_de
             FROM mensajes m
             WHERE m.clave_chat = %s AND m.fecha < %s
               AND m.fecha > COALESCE(
@@ -4973,15 +4986,17 @@ def _procesar_mensaje_nuevo(data):
     # Lo usan tanto el socket (mensaje_enviado) como la respuesta rápida desde una notificación.
     es_grupo = data.get('esGrupo', 0)
     clave_chat = data['receptor'] if es_grupo else "_".join(sorted([data['emisor'], data['receptor']]))
-    
+    reenviado_de = data.get('reenviadoDe')
+    reenviado_de = str(reenviado_de).strip()[:60] if isinstance(reenviado_de, str) and reenviado_de.strip() else None
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id)
-        VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
+        INSERT INTO mensajes (clave_chat, emisor, receptor, texto, nombreEmisor, es_grupo, leido, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, reenviado_de)
+        VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s)
         RETURNING id, fecha
     """, (clave_chat, data['emisor'], data['receptor'], data['texto'], data['nombreEmisor'], es_grupo,
-          data.get('respondeAId'), data.get('respondeATexto'), data.get('respondeANombre'), data.get('respondeAEmisorId')))
+          data.get('respondeAId'), data.get('respondeATexto'), data.get('respondeANombre'), data.get('respondeAEmisorId'), reenviado_de))
     saved = cursor.fetchone()
     conn.commit()
     cursor.close()
@@ -5001,6 +5016,7 @@ def _procesar_mensaje_nuevo(data):
         'responde_a_texto': data.get('respondeATexto'),
         'responde_a_nombre': data.get('respondeANombre'),
         'responde_a_emisor_id': data.get('respondeAEmisorId'),
+        'reenviado_de': reenviado_de,
     }
 
     if es_grupo:
