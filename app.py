@@ -256,6 +256,14 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_emisor ON mensajes (emisor)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_receptor ON mensajes (receptor)")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS visto_en_pantalla BOOLEAN DEFAULT FALSE")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vistos_grupo (
+            mensaje_id INTEGER,
+            usuario_id TEXT,
+            fecha TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'utc'),
+            PRIMARY KEY (mensaje_id, usuario_id)
+        )
+    """)
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_id INTEGER")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_texto TEXT")
     cursor.execute("ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS responde_a_nombre TEXT")
@@ -396,7 +404,6 @@ HTML_LAYOUT = """
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="google-site-verification" content="wGjP2V2leY-mXZ5JyLAvWNo9TLzb9IKNwJt15ckhPu4" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Arxechat</title>
     <meta name="description" content="Es una plataforma de mensajes creada por Arxe. Chatea de forma rápida y sencilla con conversaciones privadas y grupos.">
@@ -466,6 +473,11 @@ HTML_LAYOUT = """
         .orden-fila.arrastrando { background: var(--bg-input); box-shadow: 0 4px 14px rgba(0,0,0,0.35); position: relative; z-index: 2; }
         .modal-box .compartir-fila input[type="checkbox"] { width: 22px; height: 22px; min-width: 22px; padding: 0; margin: 0; flex: 0 0 22px; accent-color: var(--accent); background: transparent; }
         .compartir-fila .compartir-nombre { flex: 1; min-width: 0; color: var(--text-main); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tick-grupo { cursor: pointer; }
+        .tick-grupo small { font-size: .7em; margin-left: 2px; }
+        .qv-titulo { font-weight: 700; margin: 12px 0 4px; color: var(--accent); }
+        .qv-fila { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(128,128,128,.25); }
+        .qv-fila small, .qv-vacio { opacity: .7; }
         .badge-verif { width: 2.3em; height: 2.3em; vertical-align: middle; margin: 0 0 0 4px; cursor: pointer; object-fit: contain; }
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal-box { background: var(--bg-card); padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; text-align: center; border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
@@ -700,6 +712,14 @@ HTML_LAYOUT = """
             <h2>Opciones</h2>
             <button type="button" class="btn-action" onclick="confirmarVaciarConversacion()">Vaciar conversación</button>
             <button type="button" class="btn-action btn-danger" onclick="confirmarEliminarContacto()">Eliminar contacto</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="quienVistoModal" style="display:none;" onclick="if(event.target===this)cerrarQuienHaVisto()">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarQuienHaVisto()">&times;</span>
+            <h3 style="margin-top:0;">Visto por</h3>
+            <div id="quienVistoLista" style="max-height:60vh;overflow-y:auto;text-align:left;"></div>
         </div>
     </div>
 
@@ -1026,7 +1046,7 @@ HTML_LAYOUT = """
             return salida;
         }
         function firmaMensajes(msgs) {
-            return msgs.map(m => m.id + ':' + (m.texto || '').length + ':' + (m.visto_en_pantalla ? 1 : 0) + ':' + (m.leido ? 1 : 0)).join('|');
+            return msgs.map(m => m.id + ':' + (m.texto || '').length + ':' + (m.visto_en_pantalla ? 1 : 0) + ':' + (m.leido ? 1 : 0) + ':' + (m.vistos_n || 0) + ':' + (m.visto_por_mi ? 1 : 0)).join('|');
         }
         function chatIdDeMensaje(m) {
             if (m.esGrupo || m.es_grupo) return m.receptor;
@@ -2755,6 +2775,10 @@ HTML_LAYOUT = """
             if (esMio && !contactoActivo.esGrupo) {
                 const visto = (msg.visto_en_pantalla === true) ? 'visto' : '';
                 tickHtml = `<span class="tick-leido ${visto}">&#10003;</span>`;
+            } else if (esMio && contactoActivo.esGrupo) {
+                const vn = Number(msg.vistos_n || 0), tn = Number(msg.total_n || 0);
+                const todos = (tn > 0 && vn >= tn) ? 'visto' : '';
+                tickHtml = `<span class="tick-leido tick-grupo ${todos}" onclick="abrirQuienHaVisto(${msg.id !== undefined && msg.id !== null ? Number(msg.id) : 0})">&#10003;${vn > 0 ? '<small>' + vn + '</small>' : ''}</span>`;
             }
             msgElement.innerHTML = `${senderHeader}${quotedHtml}${formatearTextoConLinks(msg.texto)}<span class="message-time">${horaLocal}${tickHtml}</span>`;
             
@@ -2762,6 +2786,8 @@ HTML_LAYOUT = """
             rowDiv.appendChild(msgElement);
             if (esMio && msg.id !== undefined && msg.id !== null) instalarEventosMensaje(rowDiv, msgElement, msg.id);
             if (!esMio && !contactoActivo.esGrupo && msg.id !== undefined && msg.id !== null && msg.visto_en_pantalla !== true) {
+                observarVisibilidadMensaje(rowDiv, msg.id);
+            } else if (!esMio && contactoActivo.esGrupo && msg.id !== undefined && msg.id !== null && msg.visto_por_mi !== true) {
                 observarVisibilidadMensaje(rowDiv, msg.id);
             }
             if (msg.id !== undefined && msg.id !== null) instalarSwipeResponder(rowDiv, msg.id);
@@ -2928,6 +2954,62 @@ HTML_LAYOUT = """
                     observerMensajesVistos.unobserve(fila);
                 }
             });
+        });
+
+        socket.on('visto_grupo', (data) => {
+            const fila = document.querySelector(`#messages .msg-row.sent[data-message-id="${data.mensaje_id}"]`);
+            if (!fila) return;
+            const tick = fila.querySelector('.tick-grupo');
+            if (!tick) return;
+            tick.innerHTML = '&#10003;' + (data.vistos > 0 ? '<small>' + data.vistos + '</small>' : '');
+            if (data.total > 0 && data.vistos >= data.total) tick.classList.add('visto');
+            if (document.getElementById('quienVistoModal').style.display === 'flex' && quienVistoId === data.mensaje_id) {
+                socket.emit('quien_ha_visto', { mensaje_id: data.mensaje_id, usuario_id: miUsuario.id });
+            }
+        });
+
+        let quienVistoId = null;
+        function abrirQuienHaVisto(id) {
+            if (!id || !miUsuario) return;
+            quienVistoId = id;
+            document.getElementById('quienVistoLista').textContent = 'Cargando...';
+            document.getElementById('quienVistoModal').style.display = 'flex';
+            socket.emit('quien_ha_visto', { mensaje_id: id, usuario_id: miUsuario.id });
+        }
+        function cerrarQuienHaVisto() {
+            document.getElementById('quienVistoModal').style.display = 'none';
+            quienVistoId = null;
+        }
+        socket.on('quien_ha_visto_resultado', (data) => {
+            if (data.mensaje_id !== quienVistoId) return;
+            const cont = document.getElementById('quienVistoLista');
+            cont.textContent = '';
+            const vistos = data.lista.filter(x => x.fecha);
+            const faltan = data.lista.filter(x => !x.fecha);
+            function titulo(t) {
+                const h = document.createElement('div');
+                h.className = 'qv-titulo';
+                h.textContent = t;
+                cont.appendChild(h);
+            }
+            function fila(x) {
+                const d = document.createElement('div');
+                d.className = 'qv-fila';
+                const n = document.createElement('span');
+                n.textContent = x.nombre;
+                d.appendChild(n);
+                if (x.fecha) {
+                    const f = new Date(x.fecha);
+                    const h = document.createElement('small');
+                    h.textContent = calificativoFechaMensaje(f) + f.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    d.appendChild(h);
+                }
+                cont.appendChild(d);
+            }
+            titulo('Visto por (' + vistos.length + ')');
+            if (!vistos.length) { const v = document.createElement('div'); v.className = 'qv-vacio'; v.textContent = 'Nadie todavía'; cont.appendChild(v); }
+            vistos.forEach(fila);
+            if (faltan.length) { titulo('Sin ver (' + faltan.length + ')'); faltan.forEach(fila); }
         });
 
         socket.on('mensaje_visto', (data) => {
@@ -4612,9 +4694,9 @@ def cargar_historial(data):
 
     if es_grupo:
         cursor.execute("""
-            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id
+            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, (SELECT COUNT(*) FROM vistos_grupo v WHERE v.mensaje_id = mensajes.id) AS vistos_n, (SELECT COUNT(*) FROM miembros_grupo g WHERE g.grupo_id = mensajes.receptor AND g.usuario_id != mensajes.emisor) AS total_n, EXISTS(SELECT 1 FROM vistos_grupo v2 WHERE v2.mensaje_id = mensajes.id AND v2.usuario_id = %s) AS visto_por_mi
             FROM mensajes WHERE clave_chat = %s ORDER BY fecha DESC LIMIT %s
-        """, (clave_chat, LIMITE_HISTORIAL))
+        """, (mi_id, clave_chat, LIMITE_HISTORIAL))
     else:
         # Si yo vacié esta conversación, no debo ver los mensajes anteriores a ese momento.
         cursor.execute("""
@@ -4657,9 +4739,9 @@ def cargar_mas_historial(data):
     cursor = conn.cursor()
     if es_grupo:
         cursor.execute("""
-            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id
+            SELECT id, emisor, receptor, texto, nombreEmisor, fecha, leido, visto_en_pantalla, responde_a_id, responde_a_texto, responde_a_nombre, responde_a_emisor_id, (SELECT COUNT(*) FROM vistos_grupo v WHERE v.mensaje_id = mensajes.id) AS vistos_n, (SELECT COUNT(*) FROM miembros_grupo g WHERE g.grupo_id = mensajes.receptor AND g.usuario_id != mensajes.emisor) AS total_n, EXISTS(SELECT 1 FROM vistos_grupo v2 WHERE v2.mensaje_id = mensajes.id AND v2.usuario_id = %s) AS visto_por_mi
             FROM mensajes WHERE clave_chat = %s AND fecha < %s ORDER BY fecha DESC LIMIT %s
-        """, (clave_chat, antes_de, LIMITE_HISTORIAL))
+        """, (mi_id, clave_chat, antes_de, LIMITE_HISTORIAL))
     else:
         cursor.execute("""
             SELECT m.id, m.emisor, m.receptor, m.texto, m.nombreEmisor, m.fecha, m.leido, m.visto_en_pantalla, m.responde_a_id, m.responde_a_texto, m.responde_a_nombre, m.responde_a_emisor_id
@@ -4694,6 +4776,33 @@ def marcar_mensaje_visto(data):
     conn = get_db()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT emisor, receptor, es_grupo FROM mensajes WHERE id = %s", (mensaje_id,))
+        info = cursor.fetchone()
+        if info and info['es_grupo']:
+            # Grupos: se apunta quién lo ha visto, sin tocar el mensaje en sí.
+            if sid_a_usuario.get(request.sid) != lector_id or info['emisor'] == lector_id:
+                cursor.close()
+                return
+            cursor.execute("SELECT 1 FROM miembros_grupo WHERE grupo_id = %s AND usuario_id = %s", (info['receptor'], lector_id))
+            if not cursor.fetchone():
+                cursor.close()
+                return
+            cursor.execute("""
+                INSERT INTO vistos_grupo (mensaje_id, usuario_id) VALUES (%s, %s)
+                ON CONFLICT DO NOTHING RETURNING mensaje_id
+            """, (mensaje_id, lector_id))
+            nuevo = cursor.fetchone()
+            vistos = total = 0
+            if nuevo:
+                cursor.execute("SELECT COUNT(*) AS n FROM vistos_grupo WHERE mensaje_id = %s", (mensaje_id,))
+                vistos = cursor.fetchone()['n']
+                cursor.execute("SELECT COUNT(*) AS n FROM miembros_grupo WHERE grupo_id = %s AND usuario_id != %s", (info['receptor'], info['emisor']))
+                total = cursor.fetchone()['n']
+            conn.commit()
+            cursor.close()
+            if nuevo:
+                socketio.emit('visto_grupo', {'mensaje_id': mensaje_id, 'vistos': vistos, 'total': total}, room=info['emisor'])
+            return
         cursor.execute("""
             UPDATE mensajes SET visto_en_pantalla = TRUE, leido = 1
             WHERE id = %s AND emisor != %s AND visto_en_pantalla = FALSE
@@ -4707,6 +4816,39 @@ def marcar_mensaje_visto(data):
     if fila:
         socketio.emit('mensaje_visto', {'mensaje_id': mensaje_id}, room=fila['emisor'])
         socketio.emit('contactos_cargados', _construir_lista_contactos(lector_id), room=lector_id)
+
+@socketio.on('quien_ha_visto')
+def quien_ha_visto(data):
+    mensaje_id = data.get('mensaje_id')
+    usuario_id = data.get('usuario_id')
+    if not mensaje_id or not usuario_id or sid_a_usuario.get(request.sid) != usuario_id:
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT emisor, receptor, es_grupo FROM mensajes WHERE id = %s", (mensaje_id,))
+        m = cursor.fetchone()
+        if not m or not m['es_grupo'] or m['emisor'] != usuario_id:
+            cursor.close()
+            return
+        cursor.execute("""
+            SELECT u.id, u.nombre, v.fecha
+            FROM miembros_grupo g
+            JOIN usuarios u ON u.id = g.usuario_id
+            LEFT JOIN vistos_grupo v ON v.mensaje_id = %s AND v.usuario_id = g.usuario_id
+            WHERE g.grupo_id = %s AND g.usuario_id != %s
+            ORDER BY v.fecha ASC NULLS LAST, u.nombre
+        """, (mensaje_id, m['receptor'], usuario_id))
+        filas = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+    lista = []
+    for r in filas:
+        f = r['fecha']
+        lista.append({'id': r['id'], 'nombre': r['nombre'],
+                      'fecha': (f.isoformat() + ('Z' if f.tzinfo is None else '')) if f else None})
+    emit('quien_ha_visto_resultado', {'mensaje_id': mensaje_id, 'lista': lista})
 
 def _procesar_mensaje_nuevo(data):
     # Guarda el mensaje, lo reparte en directo y manda las notificaciones push.
