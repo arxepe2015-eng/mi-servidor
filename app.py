@@ -8,6 +8,7 @@ import hmac
 import hashlib
 import urllib.parse
 import time
+import threading
 import html as html_lib
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -1529,6 +1530,9 @@ HTML_LAYOUT = """
             socket.emit('obtener_contactos', { id: miUsuario.id });
             cargarContactosDeCache();
 
+            window.addEventListener('pagehide', () => {
+                if (miUsuario) socket.emit('usuario_inactivo', { usuario_id: miUsuario.id });
+            });
             document.addEventListener('visibilitychange', () => {
                 if (!miUsuario) return;
                 if (document.hidden) {
@@ -4052,9 +4056,54 @@ def admin_api_insignia():
 def home():
     return render_template_string(HTML_LAYOUT)
 
+def _sid_vivo(sid):
+    # True si Socket.IO sigue dando esa conexión por viva. Si no se puede saber, se asume viva.
+    try:
+        return bool(socketio.server.manager.is_connected(sid, '/'))
+    except Exception:
+        return True
+
+def _limpiar_conexiones_muertas():
+    # Quita conexiones fantasma (sobre todo de iPhone/iPad, que congelan la página sin avisar)
+    # y marca "última conexión" a quien se quede sin ninguna conexión viva.
+    for uid in list(usuario_a_sids.keys()):
+        sids = usuario_a_sids.get(uid)
+        if not sids:
+            usuario_a_sids.pop(uid, None)
+            continue
+        muertos = [x for x in list(sids) if not _sid_vivo(x)]
+        for x in muertos:
+            sids.discard(x)
+            sid_a_usuario.pop(x, None)
+        if muertos and not sids:
+            usuario_a_sids.pop(uid, None)
+            try:
+                _marcar_desconectado(uid)
+            except Exception as e:
+                print('Error marcando desconexión en la limpieza:', e, flush=True)
+    for x in list(sid_a_usuario.keys()):
+        if not _sid_vivo(x):
+            sid_a_usuario.pop(x, None)
+
+_barrido_iniciado = False
+def _iniciar_barrido_conexiones():
+    global _barrido_iniciado
+    if _barrido_iniciado:
+        return
+    _barrido_iniciado = True
+    def bucle():
+        while True:
+            time.sleep(20)
+            try:
+                _limpiar_conexiones_muertas()
+            except Exception as e:
+                print('Error en el barrido de conexiones:', e, flush=True)
+    threading.Thread(target=bucle, daemon=True).start()
+
 @socketio.on('conectar_usuario')
 def conectar(data):
     from flask_socketio import join_room
+    _iniciar_barrido_conexiones()
     join_room(data['id'])
 
     conn = get_db()
@@ -4065,10 +4114,12 @@ def conectar(data):
     cursor.close()
     conn.close()
 
+    contador_eventos_presencia['conectar_usuario'] += 1
+    if not _sid_vivo(request.sid):
+        return {'ok': False}
     estaba_desconectado = not usuario_a_sids.get(data['id'])
     usuario_a_sids.setdefault(data['id'], set()).add(request.sid)
     sid_a_usuario[request.sid] = data['id']
-    contador_eventos_presencia['conectar_usuario'] += 1
     if estaba_desconectado:
         socketio.emit('estado_usuario', {'usuario_id': data['id'], 'en_linea': True, 'ultima_conexion': None})
     # El valor devuelto llega al cliente como confirmación: así sabe que ya está identificado
@@ -4103,6 +4154,9 @@ def usuario_inactivo(data):
 def usuario_activo(data):
     contador_eventos_presencia['usuario_activo'] += 1
     usuario_id = data['usuario_id']
+    if not _sid_vivo(request.sid):
+        # Aviso tardío de una conexión que ya se cerró: no se vuelve a marcar "en línea".
+        return
     sid_a_usuario[request.sid] = usuario_id
     estaba_desconectado = not usuario_a_sids.get(usuario_id)
     usuario_a_sids.setdefault(usuario_id, set()).add(request.sid)
@@ -4126,6 +4180,7 @@ def desconectar():
 @socketio.on('consultar_estado_usuario')
 def consultar_estado_usuario(data):
     usuario_id = data['usuario_id']
+    _limpiar_conexiones_muertas()
     en_linea = bool(usuario_a_sids.get(usuario_id))
     ultima = None
     if not en_linea:
