@@ -106,6 +106,8 @@ def usuario_publico(row):
     u['fondoChat'] = u.get('fondoChat', u.get('fondochat'))
     u['brilloFondo'] = u.get('brilloFondo', u.get('brillofondo', 100))
     u.pop('ultima_conexion', None)
+    for _c in ('foto_original', 'foto_aspecto', 'fondo_original', 'fondo_aspecto'):
+        u.pop(_c, None)
     return u
 
 def enviar_push_a_usuario(usuario_id, payload):
@@ -202,6 +204,8 @@ def init_db():
     # Asegurar que existan las columnas nuevas si la tabla fue creada anteriormente
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_sent TEXT DEFAULT 'default'")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_recv TEXT DEFAULT 'default'")
+    for _col in ('foto_original', 'foto_aspecto', 'fondo_original', 'fondo_aspecto'):
+        cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS " + _col + " TEXT")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultima_conexion TIMESTAMP")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS insignia BOOLEAN DEFAULT FALSE")
 
@@ -744,6 +748,67 @@ HTML_LAYOUT = """
             #replyPreviewBar { bottom: calc(max(5px, env(safe-area-inset-bottom)) + 48px); }
             .sidebar-header { margin: 4px 8px; }
         }
+
+        /* ===== Ajustes con secciones ===== */
+        .modal-box.ajustes-box { max-width: 780px; width: 94%; height: min(640px, 90vh); padding: 0; display: flex; flex-direction: column; overflow: hidden; text-align: left; }
+        .aj-cabecera { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px 8px; position: relative; }
+        .aj-cabecera h2 { margin: 0; }
+        .aj-cabecera .close-btn { position: static; font-size: 1.8rem; cursor: pointer; line-height: 1; padding: 0 4px; }
+        .aj-cuerpo { flex: 1; min-height: 0; display: flex; }
+        .aj-nav { width: 170px; flex-shrink: 0; padding: 8px 10px 12px 14px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+        .modal-box .aj-nav button { width: 100%; text-align: left; padding: 11px 16px; border-radius: 18px; background: transparent; border: 1px solid transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; color: var(--text-main); font-weight: 600; margin: 0; }
+        .modal-box .aj-nav button.activo { background: var(--g-bg); border-color: var(--g-border); box-shadow: inset 0 1px 0 var(--g-hi); color: var(--accent); }
+        .aj-paneles { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 22px 16px 8px; }
+        .aj-panel { display: none; }
+        .aj-panel.activo { display: block; }
+        .aj-titulo { font-size: 1.15rem; color: var(--accent); margin: 4px 0 10px; }
+        .aj-subtitulo { font-size: 0.95rem; color: var(--accent); margin: 0 0 8px; }
+        .aj-sub { font-size: 0.78rem; color: var(--text-sub); margin-top: 2px; }
+        .aj-fila { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+        .aj-fila > div { min-width: 0; }
+        .modal-box .aj-btn-chico { width: auto; padding: 8px 16px; margin: 0; white-space: nowrap; }
+        .modal-box .aj-btn-sec { background: var(--g-bg); color: var(--accent); border: 1px solid var(--accent); }
+        .aj-fila-img { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+        .aj-fila-img .btn-action { flex: 1 1 calc(50% - 4px); width: auto; margin: 0; padding: 11px 10px; }
+        .aj-fila-img .aj-sel { flex: 1 1 100%; }
+        .aj-sep { margin: 16px 0; border: 0; border-top: 1px solid var(--g-border); }
+        .aj-panel .btn-action { margin-top: 8px; }
+        .aj-interruptor { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 16px; padding: 12px 14px; border-radius: 18px; border: 1px solid var(--g-border); background: var(--g-bg); cursor: pointer; }
+        .modal-box .aj-interruptor input { width: 24px; height: 24px; min-width: 24px; margin: 0; accent-color: var(--accent); }
+        .aj-pie { padding: 10px 22px 16px; border-top: 1px solid var(--g-border); }
+        .aj-pie .btn-action { margin: 0; }
+        @media (max-width: 640px) {
+            .modal-box.ajustes-box { height: 92vh; border-radius: 26px; }
+            .aj-cuerpo { flex-direction: column; }
+            .aj-nav { width: 100%; flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 4px 14px 8px; }
+            .modal-box .aj-nav button { width: auto; white-space: nowrap; padding: 9px 16px; }
+            .aj-paneles { padding: 4px 16px 12px; }
+        }
+
+        .modal-box .notify-btn { width: 46px; height: 46px; padding: 0; margin: 0; flex-shrink: 0; border-radius: 50%; background: var(--g-bg); color: var(--text-main); border: 1px solid var(--g-border); box-shadow: var(--g-shadow), inset 0 1px 0 var(--g-hi); }
+        .modal-box .notify-btn.active { border: 2px solid var(--accent); box-shadow: 0 0 0 4px rgba(0,168,132,0.28), inset 0 1px 0 var(--g-hi); }
+
+
+        /* ===== Editor de imagen ===== */
+        .modal-box.ed-box { max-width: 400px; }
+        .ed-lienzo { width: 320px; max-width: 100%; aspect-ratio: 1 / 1; margin: 10px auto; background: #14181b; border-radius: 18px; overflow: hidden; touch-action: none; border: 1px solid var(--g-border); }
+        .ed-lienzo canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+        .ed-ctl { text-align: left; margin-top: 10px; }
+        .ed-ctl label { display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--text-sub); }
+        .modal-box .ed-ctl input[type="range"] { padding: 0; margin: 6px 0 0; accent-color: var(--accent); }
+        .ed-giro { display: flex; align-items: center; gap: 8px; }
+        .ed-giro span { color: var(--text-sub); }
+        .modal-box .ed-giro input[type="number"] { width: 84px; flex: 0 0 84px; margin: 4px 0 0; padding: 8px 10px; text-align: center; }
+        .ed-botones { display: flex; gap: 10px; margin-top: 14px; }
+        .ed-botones .btn-action { margin: 0; }
+
+        /* Reducir transparencia (solo este dispositivo) */
+        body.sin-cristal { --g-bg: rgba(38,52,60,0.98); --g-blur: none; --g-accent: #00876c; --g-shadow: 0 4px 14px rgba(0,0,0,0.3); }
+        body.sin-cristal.light-theme { --g-bg: rgba(255,255,255,0.98); --g-accent: #008069; --g-shadow: 0 4px 14px rgba(31,41,55,0.15); }
+        body.sin-cristal .modal-overlay { -webkit-backdrop-filter: none; backdrop-filter: none; background: rgba(0,0,0,0.55); }
+        body.sin-cristal .sidebar, body.sin-cristal .chat-area { background: var(--bg-card); }
+        body.sin-cristal .chat-area { background: var(--bg-body); }
+        body.sin-cristal .message { background-image: none; }
     </style>
 </head>
 <body>
@@ -905,69 +970,143 @@ HTML_LAYOUT = """
 
     <div class="modal-overlay" id="settingsModal" style="display:none;">
 
-        <div class="modal-box">
-            <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
-            <h2>Ajustes de Perfil</h2>
-            <div style="margin-bottom: 10px;">
-                <span id="modalMyID" style="color: var(--accent); font-weight: bold;">ID: --------</span>
-                <button type="button" class="btn-action btn-copy" onclick="copiarMiID()">Copiar mi ID</button>
+        <div class="modal-box ajustes-box">
+            <div class="aj-cabecera">
+                <h2>Ajustes</h2>
+                <span class="close-btn" onclick="cerrarAjustes()">&times;</span>
             </div>
-            
-            <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
-            <button type="button" class="btn-action" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirCambiarContrasena()">Cambiar contraseña</button>
-            <button type="button" class="btn-action" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditarOrden()">Editar contactos y grupos</button>
-            
-            <label class="file-label">Tema visual:</label>
-            <select id="editTheme">
-                <option value="dark">Oscuro (Negro)</option>
-                <option value="light">Claro (Blanco)</option>
-            </select>
+            <div class="aj-cuerpo">
+                <nav class="aj-nav" id="ajNav">
+                    <button type="button" class="activo" data-sec="general" onclick="ajustesSeccion('general')">General</button>
+                    <button type="button" data-sec="chat" onclick="ajustesSeccion('chat')">Chat</button>
+                    <button type="button" data-sec="aspecto" onclick="ajustesSeccion('aspecto')">Aspecto</button>
+                    <button type="button" data-sec="guardado" onclick="ajustesSeccion('guardado')">Guardado de imágenes</button>
+                </nav>
+                <div class="aj-paneles">
 
-            <label class="file-label">Cambiar foto de perfil:</label>
-            <div style="display:flex; gap:8px; align-items:center;">
-                <input type="file" id="editFoto" accept="image/*" style="flex:1;">
-                <button type="button" class="btn-action" style="width:auto; margin-top:0; padding:10px 14px; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditorImagen('foto')">Editar</button>
-                <button type="button" class="btn-action btn-danger" style="width:auto; margin-top:0; padding:10px 14px;" onclick="eliminarImagenAjuste('foto')">Eliminar</button>
+                    <section class="aj-panel activo" id="ajPanel-general">
+                        <h3 class="aj-titulo">General</h3>
+                        <div class="aj-fila">
+                            <span id="modalMyID" style="color: var(--accent); font-weight: bold;">ID: --------</span>
+                            <button type="button" class="btn-action btn-copy aj-btn-chico" onclick="copiarMiID()">Copiar mi ID</button>
+                        </div>
+
+                        <label class="file-label">Nombre:</label>
+                        <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
+
+                        <button type="button" class="btn-action aj-btn-sec" onclick="abrirCambiarContrasena()">Cambiar contraseña</button>
+
+                        <div class="aj-fila" style="margin-top:14px;">
+                            <div>
+                                <div style="font-weight:600;">Notificaciones</div>
+                                <div class="aj-sub">Toca la campana para activarlas. En verde = activadas.</div>
+                            </div>
+                            <button type="button" class="notify-btn" id="notifyBtn" onclick="activarNotificaciones()" title="Activar notificaciones" aria-label="Notificaciones">🔔</button>
+                        </div>
+
+                        <label class="file-label">Foto de perfil:</label>
+                        <div class="aj-fila-img">
+                            <button type="button" class="btn-action aj-btn-sec aj-sel" onclick="document.getElementById('editFoto').click()">Seleccionar imagen</button>
+                            <input type="file" id="editFoto" accept="image/*" style="display:none;" onchange="alElegirArchivo(this,'foto','fotoArchivoNombre')">
+                            <button type="button" class="btn-action aj-btn-sec" onclick="abrirEditorImagen('foto')">Editar</button>
+                            <button type="button" class="btn-action btn-danger" onclick="eliminarImagenAjuste('foto')">Eliminar</button>
+                        </div>
+                        <div id="fotoArchivoNombre" class="aj-sub"></div>
+                        <div id="fotoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Foto editada lista para guardar</div>
+
+                        <hr class="aj-sep">
+                        <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
+                        <button type="button" class="btn-action btn-danger" onclick="eliminarCuenta()">Eliminar Cuenta</button>
+                    </section>
+
+                    <section class="aj-panel" id="ajPanel-chat">
+                        <h3 class="aj-titulo">Chat</h3>
+                        <label class="file-label">Fondo de chat:</label>
+                        <div class="aj-fila-img">
+                            <button type="button" class="btn-action aj-btn-sec aj-sel" onclick="document.getElementById('editFondoChat').click()">Seleccionar imagen</button>
+                            <input type="file" id="editFondoChat" accept="image/*" style="display:none;" onchange="alElegirArchivo(this,'fondo','fondoArchivoNombre')">
+                            <button type="button" class="btn-action aj-btn-sec" onclick="abrirEditorImagen('fondo')">Editar</button>
+                            <button type="button" class="btn-action btn-danger" onclick="eliminarImagenAjuste('fondo')">Eliminar</button>
+                        </div>
+                        <div id="fondoArchivoNombre" class="aj-sub"></div>
+                        <div id="fondoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Fondo editado listo para guardar</div>
+
+                        <label class="file-label">Brillo / Intensidad del Fondo (<span id="brilloVal">100</span>%):</label>
+                        <div class="slider-container">
+                            <input type="range" id="editBrillo" min="10" max="100" value="100" oninput="document.getElementById('brilloVal').innerText = this.value">
+                        </div>
+
+                        <hr class="aj-sep">
+                        <h3 class="aj-subtitulo">Color de mensajes</h3>
+                        <div style="text-align: left; margin-bottom: 10px;">
+                            <label class="file-label" style="margin-top:0;">Mis mensajes (Enviados):</label>
+                            <select id="editColorSentSelect" onchange="toggleColorInput('sent')">
+                                <option value="default">Predeterminado (según tema)</option>
+                                <option value="custom">Personalizado</option>
+                            </select>
+                            <input type="color" id="editColorSentInput" value="#005c4b" style="display:none; width:100%; height:38px; margin-top:5px; border:none; background:transparent; cursor:pointer;">
+                        </div>
+                        <div style="text-align: left; margin-bottom: 10px;">
+                            <label class="file-label" style="margin-top:0;">Mensajes recibidos:</label>
+                            <select id="editColorRecvSelect" onchange="toggleColorInput('recv')">
+                                <option value="default">Predeterminado (según tema)</option>
+                                <option value="custom">Personalizado</option>
+                            </select>
+                            <input type="color" id="editColorRecvInput" value="#202c33" style="display:none; width:100%; height:38px; margin-top:5px; border:none; background:transparent; cursor:pointer;">
+                        </div>
+
+                        <hr class="aj-sep">
+                        <button type="button" class="btn-action aj-btn-sec" onclick="abrirEditarOrden()">Editar contactos y grupos</button>
+                    </section>
+
+                    <section class="aj-panel" id="ajPanel-aspecto">
+                        <h3 class="aj-titulo">Aspecto</h3>
+                        <label class="file-label">Tema visual:</label>
+                        <select id="editTheme">
+                            <option value="dark">Oscuro (Negro)</option>
+                            <option value="light">Claro (Blanco)</option>
+                        </select>
+                        <label class="aj-interruptor">
+                            <span>
+                                <b>Reducir transparencia</b>
+                                <span class="aj-sub" style="display:block;">Quita el desenfoque y el cristal. Útil en dispositivos lentos o si cuesta leer. Solo afecta a este dispositivo.</span>
+                            </span>
+                            <input type="checkbox" id="chkSinCristal" onchange="aplicarSinCristal(this.checked, true)">
+                        </label>
+                    </section>
+
+                    <section class="aj-panel" id="ajPanel-guardado">
+                        <h3 class="aj-titulo">Guardado de imágenes</h3>
+                        <label class="aj-interruptor">
+                            <span>
+                                <b>Mostrar opciones de guardado de imágenes</b>
+                                <span class="aj-sub" style="display:block;">Al terminar de editar una imagen, te pregunta cómo guardarla.</span>
+                            </span>
+                            <input type="checkbox" id="chkPreguntarGuardado" onchange="cambiarPreguntarGuardado(this.checked)">
+                        </label>
+                        <div id="opcionesGuardadoFijo" style="display:none;">
+                            <label class="aj-interruptor">
+                                <span>
+                                    <b>Guardar como original</b>
+                                    <span class="aj-sub" style="display:block;">Se recorta y se guarda solo lo que se ve. No se puede volver atrás.</span>
+                                </span>
+                                <input type="checkbox" id="chkModoOriginal" onchange="elegirModoGuardado('original')">
+                            </label>
+                            <label class="aj-interruptor">
+                                <span>
+                                    <b>Guardar aspecto</b>
+                                    <span class="aj-sub" style="display:block;">Se guarda la imagen completa y tu edición, para poder volver a editarla.</span>
+                                </span>
+                                <input type="checkbox" id="chkModoAspecto" onchange="elegirModoGuardado('aspecto')">
+                            </label>
+                        </div>
+                    </section>
+
+                </div>
             </div>
-            <div id="fotoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Foto editada lista para guardar</div>
-
-            <label class="file-label">Cambiar fondo de chat:</label>
-            <div style="display:flex; gap:8px; align-items:center;">
-                <input type="file" id="editFondoChat" accept="image/*" style="flex:1;">
-                <button type="button" class="btn-action" style="width:auto; margin-top:0; padding:10px 14px; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="abrirEditorImagen('fondo')">Editar</button>
-                <button type="button" class="btn-action btn-danger" style="width:auto; margin-top:0; padding:10px 14px;" onclick="eliminarImagenAjuste('fondo')">Eliminar</button>
+            <div class="aj-pie">
+                <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
             </div>
-            <div id="fondoEditedTag" style="font-size:0.75rem; color:var(--accent); display:none; text-align:left; margin-top:2px;">✓ Fondo editado listo para guardar</div>
-
-            <label class="file-label">Brillo / Intensidad del Fondo (<span id="brilloVal">100</span>%):</label>
-            <div class="slider-container">
-                <input type="range" id="editBrillo" min="10" max="100" value="100" oninput="document.getElementById('brilloVal').innerText = this.value">
-            </div>
-
-            <hr style="margin: 15px 0; border-color: var(--border-color);">
-            <h3 style="font-size: 0.95rem; color: var(--accent); margin-bottom: 8px; text-align: left;">Color de mensajes</h3>
-
-            <div style="text-align: left; margin-bottom: 10px;">
-                <label class="file-label" style="margin-top:0;">Mis mensajes (Enviados):</label>
-                <select id="editColorSentSelect" onchange="toggleColorInput('sent')">
-                    <option value="default">Predeterminado (según tema)</option>
-                    <option value="custom">Personalizado</option>
-                </select>
-                <input type="color" id="editColorSentInput" value="#005c4b" style="display:none; width:100%; height:38px; margin-top:5px; border:none; background:transparent; cursor:pointer;">
-            </div>
-
-            <div style="text-align: left; margin-bottom: 10px;">
-                <label class="file-label" style="margin-top:0;">Mensajes recibidos:</label>
-                <select id="editColorRecvSelect" onchange="toggleColorInput('recv')">
-                    <option value="default">Predeterminado (según tema)</option>
-                    <option value="custom">Personalizado</option>
-                </select>
-                <input type="color" id="editColorRecvInput" value="#202c33" style="display:none; width:100%; height:38px; margin-top:5px; border:none; background:transparent; cursor:pointer;">
-            </div>
-
-            <button type="button" class="btn-action" id="btnGuardarAjustes" onclick="guardarAjustes()">Guardar Cambios</button>
-            <button type="button" class="btn-action btn-danger" onclick="cerrarSesion()">Cerrar Sesión</button>
-            <button type="button" class="btn-action btn-danger" onclick="eliminarCuenta()">Eliminar Cuenta</button>
         </div>
     </div>
 
@@ -986,25 +1125,42 @@ HTML_LAYOUT = """
 
     <!-- Modal Editor de Imagen (Estilo Canva / WhatsApp) -->
     <div class="modal-overlay" id="imageEditorModal" style="display:none;">
-        <div class="modal-box" style="max-width:440px;">
+        <div class="modal-box ed-box">
             <span class="close-btn" onclick="cerrarEditorImagen()">&times;</span>
             <h2 id="editorTitle">Editar Imagen</h2>
-            <div style="position:relative; width:300px; height:300px; margin:10px auto; background:#000; border-radius:8px; overflow:hidden; touch-action:none;" id="canvasContainer">
-                <canvas id="editorCanvas" width="300" height="300" style="width:100%; height:100%; cursor:grab;"></canvas>
+            <div class="ed-lienzo" id="canvasContainer">
+                <canvas id="editorCanvas" width="640" height="640"></canvas>
             </div>
-            
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:10px;">
-                <div style="flex:1; text-align:left;">
-                    <label style="font-size:0.8rem; color:var(--text-sub);">Zoom:</label>
-                    <input type="range" id="editorZoomSlider" min="0.2" max="3" step="0.05" value="1" style="width:100%; accent-color:var(--accent);" oninput="onZoomSliderChange(this.value)">
+            <div class="ed-ctl">
+                <label>Zoom <span id="edZoomTxt">×1.0</span></label>
+                <input type="range" id="editorZoomSlider" min="0" max="1000" step="1" value="0" oninput="edAlMoverZoom(this.value)">
+            </div>
+            <div class="ed-ctl">
+                <label>Giro</label>
+                <div class="ed-giro">
+                    <input type="range" id="edGiroSlider" min="-180" max="180" step="1" value="0" oninput="edAlGirar(this.value)">
+                    <input type="number" id="edGiroNum" min="-180" max="180" step="1" value="0" onchange="edAlGirar(this.value)" aria-label="Grados">
+                    <span>°</span>
                 </div>
-                <button type="button" id="rotateHoldBtn" title="Mantén pulsado para rotar" style="background:var(--bg-header); border:1px solid var(--accent); color:var(--accent); font-size:1.4rem; width:45px; height:45px; border-radius:50%; cursor:pointer; display:flex; justify-content:center; align-items:center; flex-shrink:0;">↻</button>
             </div>
+            <div class="ed-botones">
+                <button type="button" class="btn-action aj-btn-sec" onclick="resetearEditorImagen()">Restablecer</button>
+                <button type="button" class="btn-action" onclick="confirmarEdicionImagen()">Aplicar Cambios</button>
+            </div>
+        </div>
+    </div>
 
-            <div style="display:flex; gap:10px; margin-top:10px;">
-                <button type="button" class="btn-action" style="margin-top:0; background:var(--bg-header); border:1px solid var(--accent); color:var(--accent);" onclick="resetearEditorImagen()">Restablecer</button>
-                <button type="button" class="btn-action" style="margin-top:0;" onclick="confirmarEdicionImagen()">Aplicar Cambios</button>
-            </div>
+    <div class="modal-overlay" id="guardadoImagenModal" style="display:none; z-index:1200;">
+        <div class="modal-box">
+            <h2>¿Cómo quieres guardar la imagen?</h2>
+            <button type="button" class="btn-action" onclick="elegirGuardado('original')">Guardar como original</button>
+            <div class="aj-sub" style="margin-bottom:10px;">Se recorta y se guarda solo lo que se ve. No se puede volver atrás.</div>
+            <button type="button" class="btn-action" onclick="elegirGuardado('aspecto')">Guardar aspecto</button>
+            <div class="aj-sub" style="margin-bottom:10px;">Se guarda la imagen completa y tu edición. Podrás volver a editarla.</div>
+            <label class="aj-interruptor" style="margin-top:6px;">
+                <span>No volver a mostrar</span>
+                <input type="checkbox" id="chkNoMostrarGuardado">
+            </label>
         </div>
     </div>
 
@@ -1023,7 +1179,7 @@ HTML_LAYOUT = """
                     </div>
                 </button>
                 <div style="display:flex; gap:8px; align-items:center;">
-                    <button type="button" class="notify-btn" id="notifyBtn" onclick="activarNotificaciones()" title="Activar notificaciones" aria-label="Notificaciones">🔔</button>
+                    <button type="button" class="notify-btn" id="gearBtn" onclick="abrirAjustes()" title="Ajustes" aria-label="Ajustes">⚙️</button>
                     <button type="button" class="notify-btn" id="reloadBtn" onclick="recargarAplicacion()" title="Recargar Arxechat" aria-label="Recargar Arxechat">↻</button>
                     <button type="button" class="add-btn" onclick="abrirModalChoice()" title="Añadir algo">+</button>
                 </div>
@@ -1945,6 +2101,17 @@ HTML_LAYOUT = """
         }
 
         function abrirAjustes() {
+            ajustesSeccion('general');
+            refrescarOpcionesGuardado();
+            fotoEliminada = false; fondoEliminado = false;
+            ultimaEdicion = { foto: null, fondo: null };
+            pendOrig = { foto: undefined, fondo: undefined };
+            pendAsp = { foto: undefined, fondo: undefined };
+            document.getElementById('chkSinCristal').checked = document.body.classList.contains('sin-cristal');
+            document.getElementById('editFoto').value = '';
+            document.getElementById('editFondoChat').value = '';
+            document.getElementById('fotoArchivoNombre').textContent = '';
+            document.getElementById('fondoArchivoNombre').textContent = '';
             document.getElementById('editName').value = miUsuario.nombre;
             document.getElementById('editTheme').value = miUsuario.tema || 'dark';
             const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : (miUsuario.brillofondo !== undefined ? miUsuario.brillofondo : 100);
@@ -1981,6 +2148,26 @@ HTML_LAYOUT = """
         }
 
         function cerrarAjustes() { document.getElementById('settingsModal').style.display = 'none'; }
+
+        function ajustesSeccion(nombre) {
+            document.querySelectorAll('#ajNav button').forEach((b) => b.classList.toggle('activo', b.dataset.sec === nombre));
+            document.querySelectorAll('.aj-panel').forEach((p) => p.classList.toggle('activo', p.id === 'ajPanel-' + nombre));
+            const cont = document.querySelector('.aj-paneles');
+            if (cont) cont.scrollTop = 0;
+        }
+
+        function mostrarArchivoElegido(input, idTexto) {
+            const t = document.getElementById(idTexto);
+            if (t) t.textContent = (input.files && input.files.length) ? ('Elegida: ' + input.files[0].name) : '';
+        }
+
+        function aplicarSinCristal(activo, guardar) {
+            document.body.classList.toggle('sin-cristal', !!activo);
+            if (guardar) { try { localStorage.setItem('arxechat-sin-cristal', activo ? '1' : '0'); } catch (e) {} }
+        }
+        (function () {
+            try { if (localStorage.getItem('arxechat-sin-cristal') === '1') aplicarSinCristal(true, false); } catch (e) {}
+        })();
 
         function abrirCambiarContrasena() {
             document.getElementById('cpOldPass').value = '';
@@ -2091,7 +2278,18 @@ HTML_LAYOUT = """
                 nuevoFondo = await convertAndCompressBase64(fileFondo.files[0]);
             }
 
-            socket.emit('actualizar_perfil', { 
+            // Imagen original y "aspecto" (solo si cambian): ver el editor de imagen.
+            const extra = {};
+            [['foto', fotoEliminada, editedFotoBase64, fileFoto, 'foto'], ['fondo', fondoEliminado, editedFondoBase64, fileFondo, 'fondo']].forEach(([tipo, elim, editada, inp]) => {
+                const kO = tipo + 'Original', kA = tipo + 'Aspecto';
+                if (elim) { extra[kO] = null; extra[kA] = null; }
+                else if (editada) {
+                    if (pendOrig[tipo] !== undefined) extra[kO] = pendOrig[tipo];
+                    if (pendAsp[tipo] !== undefined) extra[kA] = pendAsp[tipo];
+                } else if (inp.files.length > 0) { extra[kO] = null; extra[kA] = null; }
+            });
+
+            socket.emit('actualizar_perfil', Object.assign({
                 id: miUsuario.id, 
                 nombre: nuevoNombre, 
                 pass: '', 
@@ -2101,7 +2299,7 @@ HTML_LAYOUT = """
                 brilloFondo: nuevoBrillo,
                 color_sent: colorSent,
                 color_recv: colorRecv
-            });
+            }, extra));
         }
 
         socket.on('perfil_actualizado', (res) => {
@@ -2121,280 +2319,326 @@ HTML_LAYOUT = """
         });
 
         /* --- LÓGICA DEL EDITOR DE IMAGEN --- */
+        // Marco visible: la foto de perfil es un cuadrado (se ve como círculo), el fondo un rectángulo.
+        const EDW = 320;
+        const FOTO_FRAME = { x: 40, y: 40, w: 240, h: 240 };
+        const FONDO_FRAME = { x: 16, y: 75, w: 288, h: 170 };
+        const ED_MAX_ORIGINAL = 1600;
+        // ed: imagen y su posición. (u, v) es el punto de la imagen (en píxeles de la imagen, desde su centro)
+        // que queda justo en el centro del marco; s es el zoom y a el giro en grados.
+        let ed = { img: null, W: 1, H: 1, u: 0, v: 0, s: 1, a: 0 };
+        let edBase = { src: '', esOriginal: false, guardado: false };
+        let ultimaEdicion = { foto: null, fondo: null };
+        let pendOrig = { foto: undefined, fondo: undefined };
+        let pendAsp = { foto: undefined, fondo: undefined };
+
+        function edMarco() { return editorTargetType === 'foto' ? FOTO_FRAME : FONDO_FRAME; }
+        function edLimites(a) {
+            const f = edMarco(), r = a * Math.PI / 180;
+            const c = Math.abs(Math.cos(r)), sn = Math.abs(Math.sin(r));
+            return { bw: f.w * c + f.h * sn, bh: f.w * sn + f.h * c };
+        }
+        function edEscalaMin(a) { const b = edLimites(a); return Math.max(b.bw / ed.W, b.bh / ed.H); }
+        function edEscalaMax() { const f = edMarco(); return Math.max(edEscalaMin(ed.a) * 2, Math.min(f.w, f.h) / 2); }
+        function edClamp() {
+            const smin = edEscalaMin(ed.a), smax = edEscalaMax();
+            if (ed.s < smin) ed.s = smin;
+            if (ed.s > smax) ed.s = smax;
+            const b = edLimites(ed.a);
+            const mx = Math.max(0, ed.W / 2 - b.bw / (2 * ed.s));
+            const my = Math.max(0, ed.H / 2 - b.bh / (2 * ed.s));
+            ed.u = Math.max(-mx, Math.min(mx, ed.u));
+            ed.v = Math.max(-my, Math.min(my, ed.v));
+        }
+        function edSincronizarControles() {
+            const smin = edEscalaMin(ed.a), smax = edEscalaMax();
+            const t = smax > smin ? Math.log(ed.s / smin) / Math.log(smax / smin) : 0;
+            document.getElementById('editorZoomSlider').value = Math.round(Math.max(0, Math.min(1, t)) * 1000);
+            document.getElementById('edZoomTxt').textContent = '×' + (ed.s / smin).toFixed(ed.s / smin < 10 ? 1 : 0);
+            document.getElementById('edGiroSlider').value = Math.round(ed.a);
+            document.getElementById('edGiroNum').value = Math.round(ed.a);
+        }
+        function edAjustar() { edClamp(); edSincronizarControles(); renderEditorCanvas(); }
+        function edAlMoverZoom(val) {
+            const smin = edEscalaMin(ed.a), smax = edEscalaMax();
+            ed.s = smin * Math.pow(smax / smin, parseInt(val, 10) / 1000);
+            edAjustar();
+        }
+        function edAlGirar(val) {
+            let g = parseFloat(val);
+            if (isNaN(g)) g = 0;
+            ed.a = Math.max(-180, Math.min(180, g));
+            edAjustar();
+        }
+        function edArrastrar(dx, dy) {
+            const r = ed.a * Math.PI / 180, c = Math.cos(r), sn = Math.sin(r);
+            ed.u -= (dx * c + dy * sn) / ed.s;
+            ed.v -= (-dx * sn + dy * c) / ed.s;
+            edAjustar();
+        }
+        function edPosicionInicial() {
+            ed.u = 0; ed.v = 0; ed.a = 0;
+            ed.s = edEscalaMin(0);
+            edAjustar();
+        }
+
+        function reducirImagenDataURL(src, maxDim) {
+            return new Promise((resolve) => {
+                const im = new Image();
+                im.onload = () => {
+                    let w = im.width, h = im.height;
+                    if (Math.max(w, h) > maxDim) {
+                        const k = maxDim / Math.max(w, h);
+                        w = Math.round(w * k); h = Math.round(h * k);
+                    }
+                    const cv = document.createElement('canvas');
+                    cv.width = w; cv.height = h;
+                    const cx = cv.getContext('2d');
+                    cx.imageSmoothingQuality = 'high';
+                    cx.drawImage(im, 0, 0, w, h);
+                    resolve(cv.toDataURL('image/jpeg', 0.88));
+                };
+                im.onerror = () => resolve(src);
+                im.src = src;
+            });
+        }
+
+        function alElegirArchivo(input, tipo, idTexto) {
+            mostrarArchivoElegido(input, idTexto);
+            // Un archivo nuevo sustituye a cualquier edición anterior de esa imagen.
+            if (tipo === 'foto') { editedFotoBase64 = null; fotoEliminada = false; document.getElementById('fotoEditedTag').style.display = 'none'; }
+            else { editedFondoBase64 = null; fondoEliminado = false; document.getElementById('fondoEditedTag').style.display = 'none'; }
+            ultimaEdicion[tipo] = null;
+            pendOrig[tipo] = undefined;
+            pendAsp[tipo] = undefined;
+        }
+
         function abrirEditorImagen(tipo) {
             editorTargetType = tipo;
-            const inputId = tipo === 'foto' ? 'editFoto' : 'editFondoChat';
-            const fileInput = document.getElementById(inputId);
-
+            const fileInput = document.getElementById(tipo === 'foto' ? 'editFoto' : 'editFondoChat');
             document.getElementById('editorTitle').innerText = tipo === 'foto' ? 'Editar Foto de Perfil' : 'Editar Fondo de Chat';
 
-            if (fileInput.files.length > 0) {
+            if (ultimaEdicion[tipo]) {
+                const u = ultimaEdicion[tipo];
+                edBase = { src: u.src, esOriginal: u.esOriginal, guardado: u.guardado };
+                cargarImagenEnEditor(u.src, u.t);
+            } else if (fileInput.files.length > 0) {
                 const reader = new FileReader();
-                reader.onload = (e) => cargarImagenEnEditor(e.target.result);
+                reader.onload = (e) => {
+                    reducirImagenDataURL(e.target.result, ED_MAX_ORIGINAL).then((src) => {
+                        edBase = { src: src, esOriginal: true, guardado: false };
+                        cargarImagenEnEditor(src, null);
+                    });
+                };
                 reader.readAsDataURL(fileInput.files[0]);
             } else {
                 const srcActual = tipo === 'foto' ? miUsuario.foto : miUsuario.fondoChat;
-                if (srcActual) {
-                    cargarImagenEnEditor(srcActual);
-                } else {
-                    alert("Selecciona un archivo primero o añade una imagen.");
-                }
+                if (!srcActual) { alert("Selecciona una imagen primero."); return; }
+                socket.emit('obtener_imagen_original', { id: miUsuario.id, tipo: tipo });
             }
         }
 
-        function cargarImagenEnEditor(src) {
-            editorImg = new Image();
-            editorImg.crossOrigin = "anonymous";
-            editorImg.onload = () => {
-                imgX = 150;
-                imgY = 150;
-                imgScale = 1.0;
-                imgAngle = 0;
-                document.getElementById('editorZoomSlider').value = 1.0;
+        socket.on('imagen_original_resultado', (res) => {
+            if (!res || res.tipo !== editorTargetType) return;
+            if (res.original) {
+                let t = null;
+                try { t = res.aspecto ? JSON.parse(res.aspecto) : null; } catch (e) { t = null; }
+                edBase = { src: res.original, esOriginal: true, guardado: true };
+                cargarImagenEnEditor(res.original, t);
+            } else {
+                const srcActual = res.tipo === 'foto' ? miUsuario.foto : miUsuario.fondoChat;
+                if (!srcActual) return;
+                edBase = { src: srcActual, esOriginal: false, guardado: false };
+                cargarImagenEnEditor(srcActual, null);
+            }
+        });
+
+        function cargarImagenEnEditor(src, t) {
+            const im = new Image();
+            im.onload = () => {
+                ed.img = im; ed.W = im.width; ed.H = im.height;
+                ed.u = 0; ed.v = 0; ed.a = 0; ed.s = 1;
                 document.getElementById('imageEditorModal').style.display = 'flex';
-                initCanvasEvents();
-                renderEditorCanvas();
+                edIniciarEventos();
+                if (t && t.w === ed.W && t.h === ed.H) {
+                    ed.u = +t.u || 0; ed.v = +t.v || 0; ed.a = +t.a || 0; ed.s = +t.s || edEscalaMin(+t.a || 0);
+                    edAjustar();
+                } else {
+                    edPosicionInicial();
+                }
             };
-            editorImg.src = src;
+            im.src = src;
         }
 
         function cerrarEditorImagen() {
             document.getElementById('imageEditorModal').style.display = 'none';
-            if (rotateInterval) clearInterval(rotateInterval);
         }
 
-        function onZoomSliderChange(val) {
-            imgScale = parseFloat(val);
-            renderEditorCanvas();
+        const edPunteros = new Map();
+        let edDistPrev = 0;
+        function edDistancia() {
+            const p = Array.from(edPunteros.values());
+            return p.length >= 2 ? Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) : 0;
         }
-
-        function initCanvasEvents() {
-            const canvas = document.getElementById('editorCanvas');
-            
-            canvas.onmousedown = (e) => handleStart(e.clientX, e.clientY);
-            canvas.onmousemove = (e) => handleMove(e.clientX, e.clientY);
-            canvas.onmouseup = canvas.onmouseleave = () => handleEnd();
-
-            canvas.ontouchstart = (e) => {
-                if (e.touches.length === 1) {
-                    handleStart(e.touches[0].clientX, e.touches[0].clientY);
+        function edIniciarEventos() {
+            const c = document.getElementById('editorCanvas');
+            if (c._edListo) return;
+            c._edListo = true;
+            c.style.touchAction = 'none';
+            c.addEventListener('pointerdown', (e) => {
+                try { c.setPointerCapture(e.pointerId); } catch (x) {}
+                edPunteros.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                if (edPunteros.size === 2) edDistPrev = edDistancia();
+                c.style.cursor = 'grabbing';
+            });
+            c.addEventListener('pointermove', (e) => {
+                if (!edPunteros.has(e.pointerId)) return;
+                const prev = edPunteros.get(e.pointerId);
+                const k = EDW / c.getBoundingClientRect().width;
+                const dx = (e.clientX - prev.x) * k, dy = (e.clientY - prev.y) * k;
+                edPunteros.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                if (edPunteros.size === 1) {
+                    edArrastrar(dx, dy);
+                } else if (edPunteros.size === 2) {
+                    const d = edDistancia();
+                    if (edDistPrev > 0 && d > 0) { ed.s *= d / edDistPrev; edAjustar(); }
+                    edDistPrev = d;
                 }
-            };
-            canvas.ontouchmove = (e) => {
-                if (e.touches.length === 1) {
-                    handleMove(e.touches[0].clientX, e.touches[0].clientY);
-                }
-            };
-            canvas.ontouchend = () => handleEnd();
-
-            // Configurar botón de rotación continua
-            const rotateBtn = document.getElementById('rotateHoldBtn');
-            
-            const startRotate = () => {
-                if (rotateInterval) clearInterval(rotateInterval);
-                rotateInterval = setInterval(() => {
-                    imgAngle = (imgAngle + 3) % 360;
-                    renderEditorCanvas();
-                }, 30);
-            };
-
-            const stopRotate = () => {
-                if (rotateInterval) {
-                    clearInterval(rotateInterval);
-                    rotateInterval = null;
-                }
-            };
-
-            rotateBtn.onmousedown = startRotate;
-            rotateBtn.onmouseup = rotateBtn.onmouseleave = stopRotate;
-            rotateBtn.ontouchstart = (e) => { e.preventDefault(); startRotate(); };
-            rotateBtn.ontouchend = stopRotate;
-        }
-
-        function getCanvasPoint(clientX, clientY) {
-            const canvas = document.getElementById('editorCanvas');
-            const rect = canvas.getBoundingClientRect();
-            return {
-                x: (clientX - rect.left) * (300 / rect.width),
-                y: (clientY - rect.top) * (300 / rect.height)
-            };
-        }
-
-        function handleStart(clientX, clientY) {
-            const pt = getCanvasPoint(clientX, clientY);
-            
-            // Comprobar si se hace clic en alguna esquina de las 4 para escalar
-            activeHandle = null;
-            for (let i = 0; i < cornerPoints.length; i++) {
-                const dist = Math.hypot(pt.x - cornerPoints[i].x, pt.y - cornerPoints[i].y);
-                if (dist < 20) {
-                    activeHandle = i;
-                    break;
-                }
-            }
-
-            if (activeHandle !== null) {
-                dragStartX = clientX;
-                dragStartY = clientY;
-            } else {
-                isDragging = true;
-                dragStartX = clientX;
-                dragStartY = clientY;
-                dragStartImgX = imgX;
-                dragStartImgY = imgY;
-            }
-        }
-
-        function handleMove(clientX, clientY) {
-            if (activeHandle !== null) {
-                const pt = getCanvasPoint(clientX, clientY);
-                const distCenter = Math.hypot(pt.x - imgX, pt.y - imgY);
-                const baseRadius = Math.hypot(editorImg.width / 2, editorImg.height / 2);
-                if (baseRadius > 0) {
-                    imgScale = Math.max(0.1, Math.min(4.0, distCenter / baseRadius));
-                    document.getElementById('editorZoomSlider').value = imgScale;
-                    renderEditorCanvas();
-                }
-            } else if (isDragging) {
-                const pt = getCanvasPoint(clientX, clientY);
-                const ptStart = getCanvasPoint(dragStartX, dragStartY);
-                imgX = dragStartImgX + (pt.x - ptStart.x);
-                imgY = dragStartImgY + (pt.y - ptStart.y);
-                renderEditorCanvas();
-            }
-        }
-
-        function handleEnd() {
-            isDragging = false;
-            activeHandle = null;
+            });
+            const fin = (e) => { edPunteros.delete(e.pointerId); edDistPrev = 0; c.style.cursor = 'grab'; };
+            c.addEventListener('pointerup', fin);
+            c.addEventListener('pointercancel', fin);
+            c.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                ed.s *= Math.exp(-e.deltaY * 0.0015);
+                edAjustar();
+            }, { passive: false });
         }
 
         function renderEditorCanvas() {
+            if (!ed.img) return;
             const canvas = document.getElementById('editorCanvas');
             const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, 300, 300);
+            const f = edMarco();
+            const fcx = f.x + f.w / 2, fcy = f.y + f.h / 2;
+            ctx.setTransform(canvas.width / EDW, 0, 0, canvas.height / EDW, 0, 0);
+            ctx.clearRect(0, 0, EDW, EDW);
+            ctx.fillStyle = '#14181b';
+            ctx.fillRect(0, 0, EDW, EDW);
 
-            // Dibujar imagen con transformación
             ctx.save();
-            ctx.translate(imgX, imgY);
-            ctx.rotate((imgAngle * Math.PI) / 180);
-            ctx.scale(imgScale, imgScale);
-            ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+            ctx.imageSmoothingQuality = 'high';
+            ctx.translate(fcx, fcy);
+            ctx.rotate(ed.a * Math.PI / 180);
+            ctx.scale(ed.s, ed.s);
+            ctx.translate(-ed.u, -ed.v);
+            ctx.drawImage(ed.img, -ed.W / 2, -ed.H / 2);
             ctx.restore();
 
-            // Dibujar capa oscura con agujero (máscara)
+            // Lo que queda fuera se oscurece; lo que se va a ver se muestra tal cual.
             ctx.save();
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-            ctx.fillRect(0, 0, 300, 300);
-
-            ctx.globalCompositeOperation = 'destination-out';
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
             ctx.beginPath();
-            if (editorTargetType === 'foto') {
-                ctx.arc(150, 150, 110, 0, Math.PI * 2);
-            } else {
-                ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
-            }
-            ctx.fill();
+            ctx.rect(0, 0, EDW, EDW);
+            if (editorTargetType === 'foto') ctx.arc(fcx, fcy, f.w / 2, 0, Math.PI * 2);
+            else ctx.rect(f.x, f.y, f.w, f.h);
+            ctx.fill('evenodd');
             ctx.restore();
 
-            // Dibujar borde guía y los 4 puntos/asideros en las esquinas de la imagen
             ctx.save();
-            ctx.strokeStyle = '#00a884';
+            ctx.strokeStyle = 'rgba(255,255,255,0.9)';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            if (editorTargetType === 'foto') {
-                ctx.arc(150, 150, 110, 0, Math.PI * 2);
-            } else {
-                ctx.rect(FONDO_RECT.x, FONDO_RECT.y, FONDO_RECT.w, FONDO_RECT.h);
-            }
+            if (editorTargetType === 'foto') ctx.arc(fcx, fcy, f.w / 2, 0, Math.PI * 2);
+            else ctx.rect(f.x, f.y, f.w, f.h);
             ctx.stroke();
-
-            // Calcular las 4 esquinas transformadas
-            const w = (editorImg.width * imgScale) / 2;
-            const h = (editorImg.height * imgScale) / 2;
-            const rad = (imgAngle * Math.PI) / 180;
-            const cos = Math.cos(rad);
-            const sin = Math.sin(rad);
-
-            cornerPoints = [
-                { x: imgX + (-w * cos - -h * sin), y: imgY + (-w * sin + -h * cos) },
-                { x: imgX + (w * cos - -h * sin), y: imgY + (w * sin + -h * cos) },
-                { x: imgX + (w * cos - h * sin), y: imgY + (w * sin + h * cos) },
-                { x: imgX + (-w * cos - h * sin), y: imgY + (-w * sin + h * cos) }
-            ];
-
-            // Dibujar asideros en las 4 esquinas
-            cornerPoints.forEach(pt => {
-                ctx.beginPath();
-                ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
-                ctx.fillStyle = '#00a884';
-                ctx.fill();
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-            });
             ctx.restore();
         }
 
-        function resetearEditorImagen() {
-            // Vuelve la posición/zoom/rotación al estado inicial (como cuando se cargó la imagen),
-            // sin cerrar el editor ni perder la imagen cargada.
-            imgX = 150;
-            imgY = 150;
-            imgScale = 1.0;
-            imgAngle = 0;
-            document.getElementById('editorZoomSlider').value = 1.0;
-            renderEditorCanvas();
+        function resetearEditorImagen() { edPosicionInicial(); }
+
+        function edGenerarRecortado() {
+            const f = edMarco();
+            const outW = editorTargetType === 'foto' ? 400 : 960;
+            const outH = Math.round(outW * f.h / f.w);
+            const cv = document.createElement('canvas');
+            cv.width = outW; cv.height = outH;
+            const cx = cv.getContext('2d');
+            cx.imageSmoothingQuality = 'high';
+            const k = outW / f.w;
+            cx.translate(outW / 2, outH / 2);
+            cx.rotate(ed.a * Math.PI / 180);
+            cx.scale(ed.s * k, ed.s * k);
+            cx.translate(-ed.u, -ed.v);
+            cx.drawImage(ed.img, -ed.W / 2, -ed.H / 2);
+            return cv.toDataURL('image/jpeg', 0.88);
+        }
+
+        function prefGuardadoPreguntar() {
+            try { return localStorage.getItem('arxechat-guardado-preguntar') !== '0'; } catch (e) { return true; }
+        }
+        function prefGuardadoModo() {
+            try { return localStorage.getItem('arxechat-guardado-modo') === 'original' ? 'original' : 'aspecto'; } catch (e) { return 'aspecto'; }
+        }
+        function refrescarOpcionesGuardado() {
+            const preguntar = prefGuardadoPreguntar(), modo = prefGuardadoModo();
+            document.getElementById('chkPreguntarGuardado').checked = preguntar;
+            document.getElementById('opcionesGuardadoFijo').style.display = preguntar ? 'none' : 'block';
+            document.getElementById('chkModoOriginal').checked = (modo === 'original');
+            document.getElementById('chkModoAspecto').checked = (modo === 'aspecto');
+        }
+        function cambiarPreguntarGuardado(v) {
+            try { localStorage.setItem('arxechat-guardado-preguntar', v ? '1' : '0'); } catch (e) {}
+            refrescarOpcionesGuardado();
+        }
+        function elegirModoGuardado(m) {
+            try { localStorage.setItem('arxechat-guardado-modo', m); } catch (e) {}
+            refrescarOpcionesGuardado();
         }
 
         function confirmarEdicionImagen() {
-            const offCanvas = document.createElement('canvas');
-            const ctx = offCanvas.getContext('2d');
-
-            if (editorTargetType === 'foto') {
-                const size = 220;
-                offCanvas.width = size;
-                offCanvas.height = size;
-
-                ctx.beginPath();
-                ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
-                ctx.clip();
-
-                const factor = size / 220; // relación del marco de 220px
-                const offsetX = (imgX - 40) * factor;
-                const offsetY = (imgY - 40) * factor;
-
-                ctx.translate(offsetX, offsetY);
-                ctx.rotate((imgAngle * Math.PI) / 180);
-                ctx.scale(imgScale * factor, imgScale * factor);
-                ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+            if (prefGuardadoPreguntar()) {
+                document.getElementById('chkNoMostrarGuardado').checked = false;
+                document.getElementById('guardadoImagenModal').style.display = 'flex';
             } else {
-                // Salida rectangular (misma proporción que FONDO_RECT), no cuadrada.
-                const outW = 960;
-                const factor = outW / FONDO_RECT.w;
-                const outH = Math.round(FONDO_RECT.h * factor);
-                offCanvas.width = outW;
-                offCanvas.height = outH;
-
-                const offsetX = (imgX - FONDO_RECT.x) * factor;
-                const offsetY = (imgY - FONDO_RECT.y) * factor;
-
-                ctx.translate(offsetX, offsetY);
-                ctx.rotate((imgAngle * Math.PI) / 180);
-                ctx.scale(imgScale * factor, imgScale * factor);
-                ctx.drawImage(editorImg, -editorImg.width / 2, -editorImg.height / 2);
+                finalizarEdicion(prefGuardadoModo());
             }
+        }
+        function elegirGuardado(modo) {
+            if (document.getElementById('chkNoMostrarGuardado').checked) {
+                try {
+                    localStorage.setItem('arxechat-guardado-preguntar', '0');
+                    localStorage.setItem('arxechat-guardado-modo', modo);
+                } catch (e) {}
+            }
+            document.getElementById('guardadoImagenModal').style.display = 'none';
+            finalizarEdicion(modo);
+        }
 
-            const editedData = offCanvas.toDataURL('image/jpeg', 0.85);
-
-            if (editorTargetType === 'foto') {
-                editedFotoBase64 = editedData;
+        function finalizarEdicion(modo) {
+            const tipo = editorTargetType;
+            const recortado = edGenerarRecortado();
+            const t = { u: ed.u, v: ed.v, s: ed.s, a: ed.a, w: ed.W, h: ed.H };
+            if (modo === 'aspecto' && edBase.esOriginal) {
+                // Se guarda la imagen completa + lo editado. Si el original ya estaba guardado, no se vuelve a enviar.
+                pendOrig[tipo] = edBase.guardado ? undefined : edBase.src;
+                pendAsp[tipo] = JSON.stringify(t);
+            } else {
+                pendOrig[tipo] = null;
+                pendAsp[tipo] = null;
+            }
+            ultimaEdicion[tipo] = { src: edBase.src, esOriginal: edBase.esOriginal, guardado: edBase.guardado, t: t };
+            if (tipo === 'foto') {
+                editedFotoBase64 = recortado;
+                fotoEliminada = false;
+                document.getElementById('fotoEditedTag').innerText = '✓ Foto editada lista para guardar';
                 document.getElementById('fotoEditedTag').style.display = 'block';
             } else {
-                editedFondoBase64 = editedData;
+                editedFondoBase64 = recortado;
+                fondoEliminado = false;
+                document.getElementById('fondoEditedTag').innerText = '✓ Fondo editado listo para guardar';
                 document.getElementById('fondoEditedTag').style.display = 'block';
             }
-
             cerrarEditorImagen();
         }
 
@@ -4493,6 +4737,18 @@ def actualizar_perfil(data):
         SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s, color_sent = %s, color_recv = %s 
         WHERE id = %s
     """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, nuevo_color_sent, nuevo_color_recv, data['id']))
+    # Imagen original y "aspecto" (para volver a editar la foto/fondo tal cual): solo si el cliente los manda.
+    for _tipo in ('foto', 'fondo'):
+        if (_tipo + 'Original') in data:
+            _o = data[_tipo + 'Original']
+            if _o is not None and (not isinstance(_o, str) or not _o.startswith('data:image/') or len(_o) > 4_000_000):
+                _o = None
+            cursor.execute("UPDATE usuarios SET " + _tipo + "_original = %s WHERE id = %s", (_o, data['id']))
+        if (_tipo + 'Aspecto') in data:
+            _a = data[_tipo + 'Aspecto']
+            if _a is not None and (not isinstance(_a, str) or len(_a) > 400):
+                _a = None
+            cursor.execute("UPDATE usuarios SET " + _tipo + "_aspecto = %s WHERE id = %s", (_a, data['id']))
     conn.commit()
 
     cursor.execute("SELECT * FROM usuarios WHERE id = %s", (data['id'],))
@@ -4501,6 +4757,22 @@ def actualizar_perfil(data):
     conn.close()
     
     emit('perfil_actualizado', {'exito': True, 'usuario': u_updated})
+
+@socketio.on('obtener_imagen_original')
+def obtener_imagen_original(data):
+    usuario_id = data.get('id')
+    tipo = data.get('tipo')
+    if tipo not in ('foto', 'fondo') or not usuario_id or sid_a_usuario.get(request.sid) != usuario_id:
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT " + tipo + "_original AS o, " + tipo + "_aspecto AS a FROM usuarios WHERE id = %s", (usuario_id,))
+        fila = cursor.fetchone()
+        cursor.close()
+    finally:
+        conn.close()
+    emit('imagen_original_resultado', {'tipo': tipo, 'original': fila['o'] if fila else None, 'aspecto': fila['a'] if fila else None})
 
 @socketio.on('crear_grupo')
 def crear_grupo(data):
