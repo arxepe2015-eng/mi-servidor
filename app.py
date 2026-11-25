@@ -10,6 +10,8 @@ import urllib.parse
 import time
 import threading
 import html as html_lib
+import zlib
+import gzip
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -98,6 +100,21 @@ def get_db():
     except Exception:
         DB_POOL.putconn(conn, close=True)
         raise
+
+CLAVE_RE = re.compile(r'^[A-Za-z0-9._-]{3,24}$')
+
+def _clave_normalizada(c):
+    return quitar_emojis(c or '').lower().strip()
+
+def _clave_en_uso(cursor, clave, excepto_id=None):
+    base = _clave_normalizada(clave)
+    cursor.execute("SELECT id, nombre, nombre_clave FROM usuarios")
+    for r in cursor.fetchall():
+        if excepto_id and r['id'] == excepto_id:
+            continue
+        if _clave_normalizada(r['nombre_clave'] or r['nombre']) == base:
+            return True
+    return False
 
 def usuario_publico(row):
     if not row:
@@ -190,7 +207,7 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             id TEXT PRIMARY KEY,
-            nombre TEXT UNIQUE,
+            nombre TEXT,
             pass TEXT,
             foto TEXT,
             fondoChat TEXT,
@@ -204,6 +221,10 @@ def init_db():
     # Asegurar que existan las columnas nuevas si la tabla fue creada anteriormente
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_sent TEXT DEFAULT 'default'")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS color_recv TEXT DEFAULT 'default'")
+    # El nombre visible ya no tiene que ser único (la unicidad pasa al nombre clave).
+    cursor.execute("ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_nombre_key")
+    cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS nombre_clave TEXT")
+    cursor.execute("UPDATE usuarios SET nombre_clave = nombre WHERE nombre_clave IS NULL")
     for _col in ('foto_original', 'foto_aspecto', 'fondo_original', 'fondo_aspecto'):
         cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS " + _col + " TEXT")
     cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS ultima_conexion TIMESTAMP")
@@ -347,6 +368,15 @@ button.red{background:#ea4335}
   <div id="msg"></div>
   <div id="contador" style="color:#8696a0"></div>
   <div id="lista"></div>
+  <h2 style="margin-top:28px">Base de datos</h2>
+  <p style="color:#8696a0;font-size:0.9rem;margin:4px 0 8px">Exportar descarga un archivo con TODO (usuarios, mensajes, grupos e imágenes en calidad original). Importar sustituye todo el contenido de esta base de datos por el del archivo. Ojo: las contraseñas están guardadas tal cual, así que el archivo las contiene; guárdalo en un sitio privado.</p>
+  <form id="formExp" method="POST" action="/admin/api/exportar" style="display:inline">
+    <input type="hidden" name="password" id="expPw">
+    <button type="button" onclick="exportarBD()">Exportar base de datos</button>
+  </form>
+  <input type="file" id="impArchivo" accept=".gz,.arxechat,.jsonl" style="display:none" onchange="importarBD(this)">
+  <button type="button" class="red" onclick="document.getElementById('impArchivo').click()">Importar base de datos</button>
+  <div id="dbmsg" style="margin:8px 0;color:#8696a0;min-height:1.2em"></div>
 </div></div>
 <script>
 var MAX=100, pw='', usuarios=[], sel={}, t=null;
@@ -401,6 +431,23 @@ function aplicar(accion){
     document.getElementById('msg').textContent=x.ok?('Hecho: '+x.d.actualizados+' usuario(s) '+(accion==='poner'?'con insignia':'sin insignia')+'.'):(x.d.error||'Error');
     if(x.ok){sel={};cargar(false);}
   });
+}
+function exportarBD(){
+  document.getElementById('expPw').value=pw;
+  document.getElementById('dbmsg').textContent='Preparando la descarga... puede tardar si hay muchas imágenes.';
+  document.getElementById('formExp').submit();
+}
+function importarBD(inp){
+  var f=inp.files[0];inp.value='';
+  if(!f){return;}
+  var m=document.getElementById('dbmsg');
+  var txt=prompt('Esto BORRA todo lo que hay ahora en esta base de datos y lo sustituye por el archivo "'+f.name+'". Para confirmar escribe: IMPORTAR');
+  if(txt!=='IMPORTAR'){m.textContent='Importación cancelada.';return;}
+  m.textContent='Subiendo e importando... no cierres esta página.';
+  fetch('/admin/api/importar',{method:'POST',headers:{'X-Admin-Key':pw,'X-Confirm':'IMPORTAR','Content-Type':'application/octet-stream'},body:f})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+  .then(function(x){m.textContent=x.ok?('Listo: '+x.d.filas+' filas importadas en '+x.d.tablas+' tablas.'):('Error: '+(x.d.error||'desconocido')+' (no se ha cambiado nada).');})
+  .catch(function(){m.textContent='Error de conexión durante la importación. Comprueba el estado antes de repetir.';});
 }
 document.getElementById('pw').addEventListener('keydown',function(e){if(e.key==='Enter'){entrar();}});
 </script></body></html>"""
@@ -789,6 +836,11 @@ HTML_LAYOUT = """
         .modal-box .notify-btn.active { border: 2px solid var(--accent); box-shadow: 0 0 0 4px rgba(0,168,132,0.28), inset 0 1px 0 var(--g-hi); }
 
 
+        .info-contacto { text-align: left; margin: 4px 0 10px; }
+        .info-contacto-fila { display: flex; justify-content: space-between; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--g-border); font-size: 0.9rem; }
+        .info-contacto-fila span { color: var(--text-sub); }
+        .info-contacto-fila b { word-break: break-all; text-align: right; }
+
         /* ===== Editor de imagen ===== */
         .modal-box.ed-box { max-width: 400px; }
         .ed-lienzo { width: 320px; max-width: 100%; aspect-ratio: 1 / 1; margin: 10px auto; background: #14181b; border-radius: 18px; overflow: hidden; touch-action: none; border: 1px solid var(--g-border); }
@@ -818,7 +870,8 @@ HTML_LAYOUT = """
         <div class="modal-box">
             <img src="/favicon.png" alt="Arxechat" style="width:78px;height:78px;border-radius:20%;object-fit:cover;margin:0 auto 12px;display:block;">
             <h2 id="authTitle">Iniciar Sesión</h2>
-            <input type="text" id="authName" placeholder="Tu nombre / usuario">
+            <input type="text" id="authName" placeholder="Nombre clave" autocapitalize="none" autocomplete="username">
+            <input type="text" id="authNombreVisible" placeholder="Tu nombre (el que verán los demás)" style="display:none;">
             <input type="password" id="authPass" placeholder="Contraseña">
             <input type="password" id="authPassConfirm" placeholder="Confirmar contraseña" style="display:none;">
             
@@ -929,6 +982,7 @@ HTML_LAYOUT = """
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarOpcionesContacto()">&times;</span>
             <h2>Opciones</h2>
+            <div class="info-contacto" id="infoContacto"></div>
             <button type="button" class="btn-action" onclick="confirmarVaciarConversacion()">Vaciar conversación</button>
             <button type="button" class="btn-action btn-danger" onclick="confirmarEliminarContacto()">Eliminar contacto</button>
         </div>
@@ -991,8 +1045,11 @@ HTML_LAYOUT = """
                             <button type="button" class="btn-action btn-copy aj-btn-chico" onclick="copiarMiID()">Copiar mi ID</button>
                         </div>
 
-                        <label class="file-label">Nombre:</label>
-                        <input type="text" id="editName" placeholder="Nuevo nombre de usuario">
+                        <label class="file-label">Nombre (el que ven los demás):</label>
+                        <input type="text" id="editName" placeholder="Tu nombre" maxlength="40">
+                        <label class="file-label">Nombre clave (para iniciar sesión):</label>
+                        <input type="text" id="editNombreClave" placeholder="nombre.clave" maxlength="24" autocapitalize="none">
+                        <div class="aj-sub">De 3 a 24 caracteres: letras, números, punto, guion o guion bajo. Tus contactos también lo ven.</div>
 
                         <button type="button" class="btn-action aj-btn-sec" onclick="abrirCambiarContrasena()">Cambiar contraseña</button>
 
@@ -1671,7 +1728,7 @@ HTML_LAYOUT = """
                 document.getElementById('authModal').style.display = 'none';
                 miUsuario = JSON.parse(sesionGuardada);
                 iniciarApp();
-                socket.emit('login_usuario', { nombre: miUsuario.nombre, pass: miUsuario.pass });
+                socket.emit('login_usuario', { nombre: miUsuario.nombre_clave || miUsuario.nombre, pass: miUsuario.pass });
             } else {
                 document.getElementById('authModal').style.display = 'flex';
             }
@@ -1714,6 +1771,8 @@ HTML_LAYOUT = """
             document.getElementById('authTitle').innerText = isRegister ? 'Registrarse' : 'Iniciar Sesión';
             document.getElementById('authBtn').innerText = isRegister ? 'Crear Cuenta' : 'Entrar';
             document.getElementById('authPassConfirm').style.display = isRegister ? 'block' : 'none';
+            document.getElementById('authNombreVisible').style.display = isRegister ? 'block' : 'none';
+            document.getElementById('authName').placeholder = isRegister ? 'Nombre clave (para iniciar sesión)' : 'Nombre clave';
             document.getElementById('fotoContainer').style.display = isRegister ? 'block' : 'none';
             document.getElementById('toggleText').innerText = isRegister ? '¿Ya tienes cuenta? Inicia sesión' : '¿Aún no tienes cuenta? Regístrate';
         }
@@ -1775,7 +1834,11 @@ HTML_LAYOUT = """
                     fotoBase64 = await convertAndCompressBase64(fileInput.files[0]);
                 }
 
-                socket.emit('registrar_usuario', { nombre, pass, foto: fotoBase64 });
+                if (!/^[A-Za-z0-9._-]{3,24}$/.test(nombre)) {
+                    return alert('El nombre clave debe tener de 3 a 24 caracteres: letras, números, punto, guion o guion bajo (sin espacios).');
+                }
+                const nombreVisible = document.getElementById('authNombreVisible').value.trim();
+                socket.emit('registrar_usuario', { nombre: nombreVisible || nombre, nombre_clave: nombre, pass, foto: fotoBase64 });
             } else {
                 socket.emit('login_usuario', { nombre, pass });
             }
@@ -1926,6 +1989,17 @@ HTML_LAYOUT = """
                 socket.emit('obtener_detalles_grupo', { grupo_id: contactoActivo.id });
                 document.getElementById('groupSettingsModal').style.display = 'flex';
             } else {
+                const ic = document.getElementById('infoContacto');
+                ic.textContent = '';
+                [['Nombre', contactoActivo.nombre], ['Nombre clave', contactoActivo.nombre_clave], ['ID', contactoActivo.id]].forEach(([et, val]) => {
+                    if (!val) return;
+                    const f = document.createElement('div');
+                    f.className = 'info-contacto-fila';
+                    const a = document.createElement('span'); a.textContent = et;
+                    const b = document.createElement('b'); b.textContent = val;
+                    f.appendChild(a); f.appendChild(b);
+                    ic.appendChild(f);
+                });
                 document.getElementById('contactOptionsModal').style.display = 'flex';
             }
         }
@@ -1985,8 +2059,9 @@ HTML_LAYOUT = """
                 const botonPrivado = esYo ? '' : `<button class="member-btn" onclick="iniciarChatPrivado('${m.id}')">Chatear en privado</button>`;
                 
                 item.innerHTML = `
-                    <div class="member-info">
-                        <strong>${m.nombre}</strong> <span style="font-size:0.8rem; color:var(--text-sub);">(ID: ${m.id})</span>
+                    <div class="member-info" style="display:block;">
+                        <strong>${escHtmlCompartir(m.nombre)}</strong> <span style="font-size:0.8rem; color:var(--text-sub);">(ID: ${escHtmlCompartir(m.id)})</span>
+                        ${m.nombre_clave ? `<div style="font-size:0.78rem; color:var(--text-sub);">Nombre clave: ${escHtmlCompartir(m.nombre_clave)}</div>` : ''}
                     </div>
                     ${botonPrivado}
                 `;
@@ -2113,6 +2188,7 @@ HTML_LAYOUT = """
             document.getElementById('fotoArchivoNombre').textContent = '';
             document.getElementById('fondoArchivoNombre').textContent = '';
             document.getElementById('editName').value = miUsuario.nombre;
+            document.getElementById('editNombreClave').value = miUsuario.nombre_clave || miUsuario.nombre;
             document.getElementById('editTheme').value = miUsuario.tema || 'dark';
             const brillo = miUsuario.brilloFondo !== undefined ? miUsuario.brilloFondo : (miUsuario.brillofondo !== undefined ? miUsuario.brillofondo : 100);
             document.getElementById('editBrillo').value = brillo;
@@ -2292,6 +2368,7 @@ HTML_LAYOUT = """
             socket.emit('actualizar_perfil', Object.assign({
                 id: miUsuario.id, 
                 nombre: nuevoNombre, 
+                nombre_clave: document.getElementById('editNombreClave').value.trim(),
                 pass: '', 
                 foto: nuevaFoto,
                 fondoChat: nuevoFondo,
@@ -4444,6 +4521,164 @@ def admin_api_insignia():
             print('Error refrescando contactos tras insignia:', e)
     return jsonify({'actualizados': actualizados})
 
+def _tablas_publicas(cursor):
+    cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name")
+    return [r['table_name'] for r in cursor.fetchall()]
+
+def _columnas(cursor, tabla):
+    cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position", (tabla,))
+    return [r['column_name'] for r in cursor.fetchall()]
+
+def _enc_valor(v):
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return {'$b': base64.b64encode(bytes(v)).decode('ascii')}
+    if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
+        return {'$d': v.isoformat()}
+    if hasattr(v, 'quantize'):
+        return {'$n': str(v)}
+    raise TypeError('tipo no exportable: ' + type(v).__name__)
+
+def _dec_valor(v):
+    if isinstance(v, dict):
+        if '$b' in v:
+            return psycopg2.Binary(base64.b64decode(v['$b']))
+        if '$d' in v:
+            return v['$d']
+        if '$n' in v:
+            return v['$n']
+        return psycopg2.extras.Json(v)
+    if isinstance(v, list):
+        return psycopg2.extras.Json(v)
+    return v
+
+def _generar_exportacion():
+    comp = zlib.compressobj(6, zlib.DEFLATED, 31)
+    def linea(obj):
+        return comp.compress((json.dumps(obj, default=_enc_valor, ensure_ascii=False) + '\n').encode('utf-8'))
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        # Una sola "foto" consistente de la base de datos durante toda la descarga.
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        tablas = _tablas_publicas(cursor)
+        yield linea({'arxechat_export': 1, 'fecha': datetime.datetime.utcnow().isoformat(), 'tablas': tablas})
+        for t in tablas:
+            cols = _columnas(cursor, t)
+            yield linea({'t': t, 'cols': cols})
+            lista_cols = ', '.join('"' + c + '"' for c in cols)
+            ultimo = '(0,0)'
+            while True:
+                cursor.execute('SELECT ctid::text AS _ct, ' + lista_cols + ' FROM "' + t + '" WHERE ctid > %s::tid ORDER BY ctid LIMIT 100', (ultimo,))
+                filas = cursor.fetchall()
+                if not filas:
+                    break
+                out = []
+                for f in filas:
+                    out.append(linea({'r': [f[c] for c in cols]}))
+                ultimo = filas[-1]['_ct']
+                yield b''.join(out)
+        yield linea({'fin': True})
+        yield comp.flush()
+        cursor.close()
+    finally:
+        conn.close()
+
+@app.route('/admin/api/exportar', methods=['POST'])
+def admin_api_exportar():
+    if not _admin_autorizado({'password': request.form.get('password')}):
+        return jsonify({'error': 'No autorizado'}), 401
+    nombre = 'arxechat-copia-' + datetime.datetime.utcnow().strftime('%Y%m%d-%H%M') + '.jsonl.gz'
+    resp = Response(_generar_exportacion(), mimetype='application/gzip')
+    resp.headers['Content-Disposition'] = 'attachment; filename="' + nombre + '"'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+@app.route('/admin/api/importar', methods=['POST'])
+def admin_api_importar():
+    if not _admin_autorizado({'password': request.headers.get('X-Admin-Key')}):
+        return jsonify({'error': 'No autorizado'}), 401
+    if request.headers.get('X-Confirm') != 'IMPORTAR':
+        return jsonify({'error': 'Falta la confirmación'}), 400
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        existentes = _tablas_publicas(cursor)
+        if not existentes:
+            conn.rollback()
+            init_db()
+            existentes = _tablas_publicas(cursor)
+        gz = gzip.GzipFile(fileobj=request.stream, mode='rb')
+        primera = gz.readline()
+        try:
+            cab = json.loads(primera)
+        except Exception:
+            cab = {}
+        if not isinstance(cab, dict) or cab.get('arxechat_export') != 1:
+            return jsonify({'error': 'El archivo no es una copia de Arxechat válida.'}), 400
+        # Todo en una sola transacción: si algo falla, no se cambia nada.
+        cursor.execute('TRUNCATE ' + ', '.join('"' + t + '"' for t in existentes) + ' RESTART IDENTITY CASCADE')
+        tabla = None
+        cols_ok = []
+        idx_ok = []
+        lote = []
+        total = 0
+        tablas_n = 0
+        terminado = False
+        def volcar():
+            nonlocal lote
+            if lote and tabla:
+                sql = 'INSERT INTO "' + tabla + '" (' + ', '.join('"' + c + '"' for c in cols_ok) + ') VALUES (' + ', '.join(['%s'] * len(cols_ok)) + ')'
+                cursor.executemany(sql, lote)
+            lote = []
+        for crudo in gz:
+            crudo = crudo.strip()
+            if not crudo:
+                continue
+            o = json.loads(crudo)
+            if 't' in o:
+                volcar()
+                tabla = o['t'] if o['t'] in existentes else None
+                if tabla:
+                    reales = set(_columnas(cursor, tabla))
+                    idx_ok = [i for i, c in enumerate(o['cols']) if c in reales]
+                    cols_ok = [o['cols'][i] for i in idx_ok]
+                    tablas_n += 1
+            elif 'r' in o:
+                if tabla and cols_ok:
+                    lote.append([_dec_valor(o['r'][i]) for i in idx_ok])
+                    total += 1
+                    if len(lote) >= 25:
+                        volcar()
+            elif o.get('fin'):
+                terminado = True
+        volcar()
+        if not terminado:
+            conn.rollback()
+            return jsonify({'error': 'El archivo está incompleto o cortado.'}), 400
+        # Reajustar los contadores de ids automáticos.
+        for t in existentes:
+            for c in _columnas(cursor, t):
+                cursor.execute("SELECT pg_get_serial_sequence(%s, %s) AS sq", ('public."' + t + '"', c))
+                sq = cursor.fetchone()['sq']
+                if sq:
+                    cursor.execute('SELECT setval(%s, COALESCE((SELECT MAX("' + c + '") FROM "' + t + '"), 0) + 1, false)', (sq,))
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print('Error importando copia:', repr(e))
+        return jsonify({'error': 'Fallo al importar: ' + str(e)[:200]}), 500
+    finally:
+        conn.close()
+    try:
+        init_db()
+    except Exception as e:
+        print('init_db tras importar:', e)
+    return jsonify({'filas': total, 'tablas': tablas_n})
+
 @app.route('/')
 def home():
     return render_template_string(HTML_LAYOUT)
@@ -4616,22 +4851,28 @@ def guardar_suscripcion_push(data):
 
 @socketio.on('registrar_usuario')
 def registrar(data):
-    nombre = data['nombre']
+    clave = str(data.get('nombre_clave') or data.get('nombre') or '').strip()
+    nombre = str(data.get('nombre') or clave).strip()[:40] or clave
+    if 'nombre_clave' in data and not CLAVE_RE.match(clave):
+        emit('auth_resultado', {'exito': False, 'mensaje': 'El nombre clave debe tener de 3 a 24 caracteres: letras, números, punto, guion o guion bajo (sin espacios).'})
+        return
+    if not clave:
+        emit('auth_resultado', {'exito': False, 'mensaje': 'Escribe un nombre clave.'})
+        return
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM usuarios WHERE nombre = %s", (nombre,))
-    row = cursor.fetchone()
+    row = _clave_en_uso(cursor, clave)
 
     if row:
         cursor.close()
         conn.close()
-        emit('auth_resultado', {'exito': False, 'mensaje': 'Ese nombre de usuario ya está en uso.'})
+        emit('auth_resultado', {'exito': False, 'mensaje': 'Ese nombre clave ya está en uso.'})
         return
 
     nuevo_id = str(random.randint(10000000, 99999999))
     cursor.execute(
-        "INSERT INTO usuarios (id, nombre, pass, foto, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (nuevo_id, nombre, data['pass'], data.get('foto'), None, 'dark', 100, 'default', 'default')
+        "INSERT INTO usuarios (id, nombre, nombre_clave, pass, foto, fondoChat, tema, brilloFondo, color_sent, color_recv) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (nuevo_id, nombre, clave, data['pass'], data.get('foto'), None, 'dark', 100, 'default', 'default')
     )
     conn.commit()
     
@@ -4670,15 +4911,14 @@ def login(data):
     nombre = data['nombre']
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM usuarios WHERE nombre = %s", (nombre,))
+    cursor.execute("SELECT * FROM usuarios WHERE nombre_clave = %s", (nombre,))
     row = cursor.fetchone()
     if not row or row['pass'] != data['pass']:
-        # Sin coincidencia exacta: se prueba ignorando emojis (con o sin ellos).
-        base = quitar_emojis(nombre).lower()
+        base = _clave_normalizada(nombre)
         if base:
             cursor.execute("SELECT * FROM usuarios WHERE pass = %s", (data['pass'],))
             for cand in cursor.fetchall():
-                if quitar_emojis(cand['nombre']).lower() == base:
+                if _clave_normalizada(cand['nombre_clave'] or cand['nombre']) == base:
                     row = cand
                     break
     cursor.close()
@@ -4723,7 +4963,22 @@ def actualizar_perfil(data):
         emit('perfil_actualizado', {'exito': False, 'mensaje': 'Usuario no encontrado.'})
         return
 
-    nuevo_nombre = data['nombre']
+    nuevo_nombre = str(data.get('nombre') or '').strip()[:40] or row['nombre']
+    nueva_clave = row['nombre_clave'] or row['nombre']
+    if data.get('nombre_clave') is not None:
+        pedida = str(data['nombre_clave']).strip()
+        if pedida and pedida != nueva_clave:
+            if not CLAVE_RE.match(pedida):
+                cursor.close()
+                conn.close()
+                emit('perfil_actualizado', {'exito': False, 'mensaje': 'El nombre clave debe tener de 3 a 24 caracteres: letras, números, punto, guion o guion bajo (sin espacios).'})
+                return
+            if _clave_en_uso(cursor, pedida, excepto_id=data['id']):
+                cursor.close()
+                conn.close()
+                emit('perfil_actualizado', {'exito': False, 'mensaje': 'Ese nombre clave ya está en uso.'})
+                return
+            nueva_clave = pedida
     nueva_pass = data['pass'] if data['pass'] else row['pass']
     nueva_foto = data['foto']
     nuevo_fondo = data.get('fondoChat')
@@ -4734,9 +4989,9 @@ def actualizar_perfil(data):
 
     cursor.execute("""
         UPDATE usuarios 
-        SET nombre = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s, color_sent = %s, color_recv = %s 
+        SET nombre = %s, nombre_clave = %s, pass = %s, foto = %s, fondoChat = %s, tema = %s, brilloFondo = %s, color_sent = %s, color_recv = %s 
         WHERE id = %s
-    """, (nuevo_nombre, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, nuevo_color_sent, nuevo_color_recv, data['id']))
+    """, (nuevo_nombre, nueva_clave, nueva_pass, nueva_foto, nuevo_fondo, nuevo_tema, nuevo_brillo, nuevo_color_sent, nuevo_color_recv, data['id']))
     # Imagen original y "aspecto" (para volver a editar la foto/fondo tal cual): solo si el cliente los manda.
     for _tipo in ('foto', 'fondo'):
         if (_tipo + 'Original') in data:
@@ -4819,7 +5074,7 @@ def obtener_detalles_grupo(data):
     creador_id = grupo_row['creador_id'] if grupo_row else None
 
     cursor.execute("""
-        SELECT u.id, u.nombre, u.foto 
+        SELECT u.id, u.nombre, u.nombre_clave, u.foto 
         FROM miembros_grupo mg 
         JOIN usuarios u ON mg.usuario_id = u.id 
         WHERE mg.grupo_id = %s
@@ -4883,8 +5138,8 @@ def agregar_miembro_grupo(data):
         cursor.execute("""
             SELECT u.id FROM contactos c
             JOIN usuarios u ON c.contacto_id = u.id
-            WHERE c.mi_id = %s AND u.nombre = %s
-        """, (usuario_id, id_o_nombre))
+            WHERE c.mi_id = %s AND (u.nombre = %s OR u.nombre_clave = %s)
+        """, (usuario_id, id_o_nombre, id_o_nombre))
         row = cursor.fetchone()
         if row:
             nuevo_id = row['id']
@@ -5021,14 +5276,14 @@ def _construir_lista_contactos(mi_id):
             ultima_por_clave[r['clave_chat']] = f.isoformat() + ('Z' if f.tzinfo is None else '')
 
     cursor.execute("""
-        SELECT u.id, u.nombre, u.foto, COALESCE(u.insignia, FALSE) AS insignia 
+        SELECT u.id, u.nombre, u.nombre_clave, u.foto, COALESCE(u.insignia, FALSE) AS insignia 
         FROM contactos c 
         JOIN usuarios u ON c.contacto_id = u.id 
         WHERE c.mi_id = %s
     """, (mi_id,))
     for r in cursor.fetchall():
         clave = "_".join(sorted([mi_id, r['id']]))
-        lista.append({'id': r['id'], 'nombre': r['nombre'], 'foto': r['foto'], 'insignia': bool(r['insignia']), 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0), 'ultima': ultima_por_clave.get(clave)})
+        lista.append({'id': r['id'], 'nombre': r['nombre'], 'nombre_clave': r['nombre_clave'], 'foto': r['foto'], 'insignia': bool(r['insignia']), 'esGuardado': True, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0), 'ultima': ultima_por_clave.get(clave)})
         ids_agregados.add(r['id'])
 
     cursor.execute("""
@@ -5053,10 +5308,10 @@ def _construir_lista_contactos(mi_id):
         otros_ids.add(otro_id)
 
     if otros_ids:
-        cursor.execute("SELECT id, nombre, foto, COALESCE(insignia, FALSE) AS insignia FROM usuarios WHERE id = ANY(%s)", (list(otros_ids),))
+        cursor.execute("SELECT id, nombre, nombre_clave, foto, COALESCE(insignia, FALSE) AS insignia FROM usuarios WHERE id = ANY(%s)", (list(otros_ids),))
         for u in cursor.fetchall():
             clave = "_".join(sorted([mi_id, u['id']]))
-            lista.append({'id': u['id'], 'nombre': u['nombre'], 'foto': u['foto'], 'insignia': bool(u['insignia']), 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0), 'ultima': ultima_por_clave.get(clave)})
+            lista.append({'id': u['id'], 'nombre': u['nombre'], 'nombre_clave': u['nombre_clave'], 'foto': u['foto'], 'insignia': bool(u['insignia']), 'esGuardado': False, 'esGrupo': False, 'sinLeer': unread_por_clave.get(clave, 0), 'ultima': ultima_por_clave.get(clave)})
             ids_agregados.add(u['id'])
 
     cursor.execute("""
