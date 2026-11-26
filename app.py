@@ -312,6 +312,14 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_push_subscriptions_usuario ON push_subscriptions (usuario_id)")
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS stickers (
+            id SERIAL PRIMARY KEY,
+            usuario_id TEXT NOT NULL,
+            data TEXT NOT NULL,
+            fecha TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'utc')
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_vaciado (
             clave_chat TEXT,
             usuario_id TEXT,
@@ -836,6 +844,24 @@ HTML_LAYOUT = """
         .modal-box .notify-btn.active { border: 2px solid var(--accent); box-shadow: 0 0 0 4px rgba(0,168,132,0.28), inset 0 1px 0 var(--g-hi); }
 
 
+        .chat-input-area input[type="text"] { min-width: 0; }
+        .chat-input-area .attach-btn { flex-shrink: 0; }
+        @media (max-width: 480px) {
+            .chat-input-area .attach-btn { width: 38px; height: 38px; font-size: 1.3rem; }
+            .chat-input-area button.send-btn { padding: 11px 12px; flex-shrink: 0; }
+            .chat-input-area { gap: 6px; padding-left: 8px; padding-right: 8px; }
+        }
+        .stickers-box { max-width: 420px; width: 94%; }
+        .stk-nota { font-size: 0.8rem; color: var(--text-sub); margin-bottom: 8px; }
+        .stk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; max-height: 46vh; overflow-y: auto; padding: 4px; margin-bottom: 10px; }
+        .stk-item { position: relative; aspect-ratio: 1; border-radius: 12px; background: var(--bg-input); display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden; }
+        .stk-item img { max-width: 92%; max-height: 92%; object-fit: contain; pointer-events: none; }
+        .stk-item .stk-x { position: absolute; top: 2px; right: 2px; width: 24px; height: 24px; border-radius: 50%; background: #ea4335; color: #fff; display: none; align-items: center; justify-content: center; font-weight: bold; font-size: 0.9rem; }
+        .stk-borrando .stk-x { display: flex; }
+        .stk-vacio { grid-column: 1 / -1; text-align: center; color: var(--text-sub); padding: 18px 0; font-size: 0.9rem; }
+        .stk-botones { display: flex; gap: 6px; flex-wrap: wrap; }
+        .stk-botones .btn-action { flex: 1; min-width: 90px; margin: 0; }
+        .sticker-msg { display: block; max-width: 170px; max-height: 170px; width: auto; height: auto; margin: 2px 0; border-radius: 6px; }
         .info-contacto { text-align: left; margin: 4px 0 10px; }
         .info-contacto-fila { display: flex; justify-content: space-between; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--g-border); font-size: 0.9rem; }
         .info-contacto-fila span { color: var(--text-sub); }
@@ -978,6 +1004,20 @@ HTML_LAYOUT = """
         </div>
     </div>
 
+    <div class="modal-overlay" id="stickersModal" style="display:none;" onclick="if(event.target===this)cerrarStickers()">
+        <div class="modal-box stickers-box">
+            <h2>Stickers</h2>
+            <div class="stk-nota" id="stkNota">Toca uno para enviarlo. Los animados (GIF o WebP animado) se siguen moviendo.</div>
+            <div class="stk-grid" id="stkGrid"></div>
+            <input type="file" id="stkArchivo" accept="image/png,image/webp,image/gif,image/jpeg" multiple style="display:none" onchange="alElegirStickers(this)">
+            <div class="stk-botones">
+                <button type="button" class="btn-action" onclick="document.getElementById('stkArchivo').click()">Añadir sticker</button>
+                <button type="button" class="btn-action" id="stkBtnBorrar" onclick="alternarBorrarStickers()">Borrar…</button>
+                <button type="button" class="btn-action" onclick="cerrarStickers()">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="contactOptionsModal" style="display:none;">
         <div class="modal-box">
             <span class="close-btn" onclick="cerrarOpcionesContacto()">&times;</span>
@@ -1017,6 +1057,7 @@ HTML_LAYOUT = """
     <div class="message-context-menu" id="messageContextMenu">
         <button type="button" id="menuBtnReenviar" onclick="reenviarMensajeSeleccionado()">Reenviar</button>
         <button type="button" id="menuBtnCopiar" onclick="copiarMensajeSeleccionado()">Copiar</button>
+        <button type="button" id="menuBtnGuardarSticker" onclick="guardarStickerSeleccionado()">Guardar sticker</button>
         <button type="button" id="menuBtnInfo" onclick="infoMensajeSeleccionado()">Información (quién lo ha visto)</button>
         <button type="button" id="menuBtnEditar" onclick="iniciarEdicionMensaje()">Editar mensaje</button>
         <button type="button" id="menuBtnEliminar" class="delete" onclick="eliminarMensajeSeleccionado()">Eliminar mensaje</button>
@@ -1282,6 +1323,7 @@ HTML_LAYOUT = """
                 <div class="chat-input-area">
                     <button type="button" class="attach-btn" onclick="document.getElementById('fileAttachmentInput').click()" title="Adjuntar archivo">+</button>
                     <input type="file" id="fileAttachmentInput" style="display:none;" onchange="manejarAdjunto(this)">
+                    <button type="button" class="attach-btn" onclick="abrirStickers()" title="Stickers">☺</button>
                     <input type="text" id="messageInput" placeholder="Escribe un mensaje..." autocomplete="off">
                     <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
                 </div>
@@ -3146,8 +3188,9 @@ HTML_LAYOUT = """
             if (!menu) return;
             const msgSel = cacheMensajes[messageId];
             const esMio = !!(msgSel && miUsuario && msgSel.emisor === miUsuario.id);
-            const esTexto = !!(msgSel && !(msgSel.texto && (msgSel.texto.startsWith('<img') || msgSel.texto.startsWith('📁 <a'))));
+            const esTexto = !!(msgSel && !(msgSel.texto && (msgSel.texto.startsWith('<img') || msgSel.texto.startsWith('📁 <a') || msgSel.texto.startsWith('sticker:data:image/'))));
             const ver = (id, v) => { const b = document.getElementById(id); if (b) b.style.display = v ? 'block' : 'none'; };
+            ver('menuBtnGuardarSticker', !!(msgSel && stickerDeTexto(msgSel.texto)));
             ver('menuBtnReenviar', !!msgSel);
             ver('menuBtnCopiar', esTexto);
             ver('menuBtnInfo', esMio && !!(contactoActivo && contactoActivo.esGrupo));
@@ -3271,7 +3314,18 @@ HTML_LAYOUT = """
         window.addEventListener('scroll', cerrarMenuMensaje, true);
         window.addEventListener('resize', cerrarMenuMensaje);
 
+        const STICKER_MSG_RE = /^sticker:(data:image\/(?:png|webp|gif|jpeg);base64,[A-Za-z0-9+\/=]+)$/;
+        function stickerDeTexto(texto) {
+            const m = STICKER_MSG_RE.exec(texto || '');
+            return m ? m[1] : null;
+        }
+
         function formatearTextoConLinks(texto) {
+            const stk = stickerDeTexto(texto);
+            if (stk) {
+                // El mensaje solo lleva los datos de la imagen: la etiqueta se crea aquí, no se envía.
+                return '<img class="sticker-msg" alt="Sticker" src="' + stk + '">';
+            }
             if (texto.startsWith('<img') || texto.startsWith('📁 <a')) {
                 return texto;
             }
@@ -3294,6 +3348,7 @@ HTML_LAYOUT = """
 
         function snippetDeMensaje(texto) {
             if (!texto) return '';
+            if (texto.startsWith('sticker:data:image/')) return '🏷️ Sticker';
             if (texto.startsWith('<img')) return '📷 Foto';
             if (texto.startsWith('📁 <a')) return '📁 Archivo adjunto';
             return texto;
@@ -3447,8 +3502,8 @@ HTML_LAYOUT = """
             if (!id || !miUsuario) return;
             const msg = cacheMensajes[id];
             if (!msg) return;
-            if (msg.texto && (msg.texto.startsWith('<img') || msg.texto.startsWith('📁 <a'))) {
-                alert('No se pueden editar fotos ni archivos, solo mensajes de texto.');
+            if (msg.texto && (msg.texto.startsWith('<img') || msg.texto.startsWith('📁 <a') || msg.texto.startsWith('sticker:data:image/'))) {
+                alert('No se pueden editar fotos, stickers ni archivos, solo mensajes de texto.');
                 return;
             }
             mensajeRespondiendo = null;
@@ -3791,7 +3846,8 @@ HTML_LAYOUT = """
 
             if (data.emisor !== miUsuario.id && !pushSubscriptionActiva && Notification.permission === "granted") {
                 let prevText = data.texto;
-                if(prevText.startsWith('<img')) prevText = '📷 Foto adjunta';
+                if(prevText.startsWith('sticker:data:image/')) prevText = '🏷️ Sticker';
+                else if(prevText.startsWith('<img')) prevText = '📷 Foto adjunta';
                 else if(prevText.startsWith('📁 <a')) prevText = '📁 Archivo adjunto';
                 new Notification("Mensaje de " + (data.nombreEmisor || data.nombreemisor), { body: prevText });
             }
@@ -4120,6 +4176,122 @@ HTML_LAYOUT = """
                 };
             }
         }
+
+        /* --- STICKERS --- */
+        let misStickers = [];
+        let stkBorrando = false;
+        const STK_MAX_CHARS = 850000;
+
+        function abrirStickers() {
+            if (!contactoActivo) return;
+            stkBorrando = false;
+            document.getElementById('stkGrid').classList.remove('stk-borrando');
+            document.getElementById('stkBtnBorrar').innerText = 'Borrar…';
+            pintarStickers();
+            document.getElementById('stickersModal').style.display = 'flex';
+            if (miUsuario) socket.emit('obtener_stickers', { usuario_id: miUsuario.id });
+        }
+        function cerrarStickers() { document.getElementById('stickersModal').style.display = 'none'; }
+
+        function pintarStickers() {
+            const g = document.getElementById('stkGrid');
+            g.textContent = '';
+            if (!misStickers.length) {
+                const v = document.createElement('div');
+                v.className = 'stk-vacio';
+                v.textContent = 'Aún no tienes stickers. Pulsa "Añadir sticker".';
+                g.appendChild(v);
+                return;
+            }
+            misStickers.forEach(st => {
+                const it = document.createElement('div');
+                it.className = 'stk-item';
+                const im = document.createElement('img');
+                im.src = st.data;
+                const x = document.createElement('div');
+                x.className = 'stk-x';
+                x.textContent = '×';
+                it.appendChild(im); it.appendChild(x);
+                it.onclick = () => {
+                    if (stkBorrando) socket.emit('borrar_sticker', { usuario_id: miUsuario.id, id: st.id });
+                    else enviarSticker(st.data);
+                };
+                g.appendChild(it);
+            });
+        }
+
+        function alternarBorrarStickers() {
+            stkBorrando = !stkBorrando;
+            document.getElementById('stkGrid').classList.toggle('stk-borrando', stkBorrando);
+            document.getElementById('stkBtnBorrar').innerText = stkBorrando ? 'Hecho' : 'Borrar…';
+            document.getElementById('stkNota').innerText = stkBorrando ? 'Toca un sticker para borrarlo.' : 'Toca uno para enviarlo. Los animados (GIF o WebP animado) se siguen moviendo.';
+        }
+
+        function enviarSticker(dataUrl) {
+            if (!contactoActivo || !stickerDeTexto('sticker:' + dataUrl)) return;
+            cerrarStickers();
+            // Solo viaja "sticker:" + los datos de la imagen; nada de etiquetas ni estilos.
+            enviarMensajeAdjunto('sticker:' + dataUrl);
+        }
+
+        function leerComoDataUrl(file) {
+            return new Promise((res, rej) => {
+                const r = new FileReader();
+                r.onload = () => res(r.result);
+                r.onerror = rej;
+                r.readAsDataURL(file);
+            });
+        }
+
+        // Reduce una imagen estática grande a 512 px (WebP). Los animados no se tocan para no perder el movimiento.
+        function reducirSticker(dataUrl) {
+            return new Promise(res => {
+                const im = new Image();
+                im.onload = () => {
+                    const k = Math.min(1, 512 / Math.max(im.width, im.height));
+                    const c = document.createElement('canvas');
+                    c.width = Math.max(1, Math.round(im.width * k));
+                    c.height = Math.max(1, Math.round(im.height * k));
+                    c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+                    res(c.toDataURL('image/webp', 0.9));
+                };
+                im.onerror = () => res(null);
+                im.src = dataUrl;
+            });
+        }
+
+        async function alElegirStickers(input) {
+            const archivos = Array.from(input.files || []);
+            input.value = '';
+            for (const f of archivos) {
+                if (!/^image\/(png|webp|gif|jpeg)$/.test(f.type)) { alert('"' + f.name + '": solo PNG, WebP, GIF o JPG.'); continue; }
+                let d = await leerComoDataUrl(f);
+                if (d.length > STK_MAX_CHARS) {
+                    if (f.type === 'image/gif') { alert('"' + f.name + '" es un GIF demasiado pesado (máx. ~600 KB).'); continue; }
+                    // Una imagen grande se reduce; si era un WebP animado se perdería el movimiento, así que se avisa.
+                    const r = await reducirSticker(d);
+                    if (!r || r.length > STK_MAX_CHARS) { alert('"' + f.name + '" es demasiado pesada para ser un sticker.'); continue; }
+                    if (f.type === 'image/webp') alert('"' + f.name + '" era grande y se ha reducido: si estaba animado, se ha guardado sin movimiento.');
+                    d = r;
+                }
+                socket.emit('agregar_sticker', { usuario_id: miUsuario.id, data: d });
+            }
+        }
+
+        function guardarStickerSeleccionado() {
+            const id = mensajeSeleccionadoParaEliminar;
+            cerrarMenuMensaje();
+            const msg = cacheMensajes[id];
+            const d = msg ? stickerDeTexto(msg.texto) : null;
+            if (!d) return;
+            socket.emit('agregar_sticker', { usuario_id: miUsuario.id, data: d });
+        }
+
+        socket.on('stickers_cargados', (res) => {
+            misStickers = (res && res.stickers) || [];
+            if (document.getElementById('stickersModal').style.display !== 'none') pintarStickers();
+        });
+        socket.on('sticker_error', (res) => { alert((res && res.mensaje) || 'No se pudo guardar el sticker.'); });
 
         function enviarMensajeAdjunto(texto) {
             if (contactoActivo) {
@@ -5523,7 +5695,7 @@ def editar_mensaje(data):
             emit('editar_mensaje_resultado', {'exito': False, 'mensaje': 'Solo puedes editar tus propios mensajes.'})
             return
         texto_anterior = msg['texto'] or ''
-        if texto_anterior.startswith('<img') or texto_anterior.startswith('📁 <a'):
+        if texto_anterior.startswith('<img') or texto_anterior.startswith('📁 <a') or texto_anterior.startswith('sticker:data:image/'):
             emit('editar_mensaje_resultado', {'exito': False, 'mensaje': 'No se pueden editar fotos ni archivos.'})
             return
 
@@ -5841,7 +6013,9 @@ def _procesar_mensaje_nuevo(data):
         push_title = 'Mensaje de ' + data['nombreEmisor']
 
     push_body = data['texto'] or 'Nuevo mensaje'
-    if push_body.startswith('<img'):
+    if push_body.startswith('sticker:data:image/'):
+        push_body = '🏷️ Sticker'
+    elif push_body.startswith('<img'):
         push_body = '📷 Foto adjunta'
     elif push_body.startswith('📁 <a'):
         push_body = '📁 Archivo adjunto'
@@ -5885,6 +6059,73 @@ def _procesar_mensaje_nuevo(data):
         payload_dest['reply_token'] = _firmar_token_respuesta(recipient_id, id_chat_destino, bool(es_grupo))
         payload_dest['actions'] = [{'action': 'reply', 'title': 'Responder', 'type': 'text', 'placeholder': 'Escribe un mensaje...'}]
         socketio.start_background_task(enviar_push_a_usuario, recipient_id, payload_dest)
+
+STICKER_RE = re.compile(r'^data:image/(png|webp|gif|jpeg);base64,[A-Za-z0-9+/=]+$')
+MAX_STICKER_CHARS = 900_000
+MAX_STICKERS_USUARIO = 80
+
+def _lista_stickers(cursor, uid):
+    cursor.execute("SELECT id, data FROM stickers WHERE usuario_id = %s ORDER BY id DESC", (uid,))
+    return [{'id': r['id'], 'data': r['data']} for r in cursor.fetchall()]
+
+@socketio.on('obtener_stickers')
+def obtener_stickers(data):
+    uid = (data or {}).get('usuario_id')
+    if not uid or sid_a_usuario.get(request.sid) != uid:
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        lista = _lista_stickers(cursor, uid)
+        cursor.close()
+    finally:
+        conn.close()
+    emit('stickers_cargados', {'stickers': lista})
+
+@socketio.on('agregar_sticker')
+def agregar_sticker(data):
+    uid = (data or {}).get('usuario_id')
+    img = (data or {}).get('data')
+    if not uid or sid_a_usuario.get(request.sid) != uid:
+        return
+    if not isinstance(img, str) or len(img) > MAX_STICKER_CHARS or not STICKER_RE.match(img):
+        emit('sticker_error', {'mensaje': 'Imagen de sticker no válida o demasiado grande.'})
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM stickers WHERE usuario_id = %s", (uid,))
+        if cursor.fetchone()['n'] >= MAX_STICKERS_USUARIO:
+            emit('sticker_error', {'mensaje': 'Has llegado al máximo de ' + str(MAX_STICKERS_USUARIO) + ' stickers. Borra alguno.'})
+            cursor.close()
+            return
+        cursor.execute("SELECT 1 FROM stickers WHERE usuario_id = %s AND data = %s", (uid, img))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO stickers (usuario_id, data) VALUES (%s, %s)", (uid, img))
+            conn.commit()
+        lista = _lista_stickers(cursor, uid)
+        cursor.close()
+    finally:
+        conn.close()
+    # Se avisa a todos los dispositivos de la misma cuenta.
+    socketio.emit('stickers_cargados', {'stickers': lista}, room=uid)
+
+@socketio.on('borrar_sticker')
+def borrar_sticker(data):
+    uid = (data or {}).get('usuario_id')
+    sid_s = (data or {}).get('id')
+    if not uid or sid_a_usuario.get(request.sid) != uid or not isinstance(sid_s, int):
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM stickers WHERE id = %s AND usuario_id = %s", (sid_s, uid))
+        conn.commit()
+        lista = _lista_stickers(cursor, uid)
+        cursor.close()
+    finally:
+        conn.close()
+    socketio.emit('stickers_cargados', {'stickers': lista}, room=uid)
 
 @socketio.on('mensaje_enviado')
 def manejar_mensaje(data):
