@@ -4328,6 +4328,62 @@ HTML_LAYOUT = """
             else avisarEscribiendo(false);
         });
 
+        // Stickers (y GIF/imágenes) del teclado del móvil: llegan como imagen en el portapapeles o como
+        // "texto enriquecido" (RTFD). Se cogen como imagen y se mandan como sticker, nunca como ese texto.
+        function imagenDePegado(dt) {
+            if (!dt) return null;
+            const archivos = Array.from(dt.files || []);
+            let f = archivos.find(a => /^image\/(png|webp|gif|jpeg)$/.test(a.type));
+            if (f) return Promise.resolve(f);
+            const items = Array.from(dt.items || []);
+            const it = items.find(i => i.kind === 'file' && /^image\/(png|webp|gif|jpeg)$/.test(i.type));
+            if (it && it.getAsFile()) return Promise.resolve(it.getAsFile());
+            const html = dt.getData ? dt.getData('text/html') : '';
+            if (html) {
+                const m = /<img[^>]+src=["'](data:image\/(?:png|webp|gif|jpeg);base64,[A-Za-z0-9+\/=]+)["']/i.exec(html);
+                if (m) return fetch(m[1]).then(r => r.blob()).then(b => new File([b], 'sticker', { type: b.type }));
+            }
+            return null;
+        }
+        function pareceTextoEnriquecido(dt) {
+            const tipos = Array.from((dt && dt.types) || []).map(t => String(t).toLowerCase());
+            const t = (dt && dt.getData) ? (dt.getData('text/plain') || '') : '';
+            return tipos.some(x => x.indexOf('rtfd') !== -1 || x.indexOf('rtf') !== -1) && (!t.trim() || /RTFD|\.rtf/i.test(t));
+        }
+        async function mandarImagenPegada(promesa) {
+            try {
+                const f = await promesa;
+                if (!f || !contactoActivo) return;
+                let d = await leerComoDataUrl(f);
+                if (d.length > STK_MAX_CHARS) {
+                    if (f.type === 'image/gif') { alert('El sticker es un GIF demasiado pesado.'); return; }
+                    d = await reducirSticker(d);
+                    if (!d || d.length > STK_MAX_CHARS) { alert('El sticker es demasiado pesado.'); return; }
+                }
+                if (stickerDeTexto('sticker:' + d)) enviarMensajeAdjunto('sticker:' + d);
+            } catch (e) { console.warn('sticker pegado', e); }
+        }
+        function manejarPegado(e) {
+            const dt = e.clipboardData || e.dataTransfer;
+            const p = imagenDePegado(dt);
+            if (p) { e.preventDefault(); mandarImagenPegada(p); return; }
+            if (pareceTextoEnriquecido(dt)) { e.preventDefault(); }
+        }
+        const _inputMsg = document.getElementById('messageInput');
+        _inputMsg.addEventListener('paste', manejarPegado);
+        _inputMsg.addEventListener('drop', manejarPegado);
+        // iOS a veces inserta el sticker directamente (sin evento "paste") con datos en beforeinput.
+        _inputMsg.addEventListener('beforeinput', (e) => {
+            if (!e.dataTransfer) return;
+            const p = imagenDePegado(e.dataTransfer);
+            if (p) { e.preventDefault(); mandarImagenPegada(p); }
+            else if (pareceTextoEnriquecido(e.dataTransfer)) e.preventDefault();
+        });
+        // Red de seguridad: si aun así se cuela texto con RTFD, se borra del cuadro.
+        _inputMsg.addEventListener('input', () => {
+            if (/RTFD|\.rtf$/i.test(_inputMsg.value) && _inputMsg.value.length < 400) _inputMsg.value = '';
+        });
+
         document.getElementById('messageInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendMessage();
         });
@@ -4339,14 +4395,51 @@ HTML_LAYOUT = """
 @app.route('/service-worker.js')
 def service_worker():
     js = r"""
-const ARXECHAT_SW_VERSION = '2026-10-25-responder-v2';
+const ARXECHAT_SW_VERSION = '2026-11-27-icono-v1';
+const _iconosComp = {};
+async function iconoFinal(url) {
+    // Si el servidor solo pudo mandar la foto cruda, se compone aquí: foto redonda + logo pequeño abajo a la derecha.
+    if (!url || url.indexOf('/icono-chat/') === -1) return url || '/favicon.png';
+    if (_iconosComp[url]) return _iconosComp[url];
+    try {
+        if (typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap === 'undefined') return url;
+        const r = await fetch(url);
+        if (!r.ok || r.headers.get('X-Icono') !== 'crudo') return url;
+        const foto = await createImageBitmap(await r.blob());
+        const lg = await fetch('/favicon.png');
+        const logo = await createImageBitmap(await lg.blob());
+        const N = 256;
+        const c = new OffscreenCanvas(N, N);
+        const x = c.getContext('2d');
+        const lado = Math.min(foto.width, foto.height);
+        x.save();
+        x.beginPath(); x.arc(N / 2, N / 2, N / 2, 0, Math.PI * 2); x.closePath(); x.clip();
+        x.drawImage(foto, (foto.width - lado) / 2, (foto.height - lado) / 2, lado, lado, 0, 0, N, N);
+        x.restore();
+        const cx = N - 54, cy = N - 54;
+        x.beginPath(); x.arc(cx, cy, 52, 0, Math.PI * 2); x.fillStyle = '#ffffff'; x.fill();
+        x.save();
+        x.beginPath(); x.arc(cx, cy, 44, 0, Math.PI * 2); x.closePath(); x.clip();
+        x.drawImage(logo, cx - 44, cy - 44, 88, 88);
+        x.restore();
+        const blob = await c.convertToBlob({ type: 'image/png' });
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+        const out = 'data:image/png;base64,' + btoa(bin);
+        _iconosComp[url] = out;
+        return out;
+    } catch (e) { return url; }
+}
 self.addEventListener('push', (event) => {
     let data = {};
     try { data = event.data ? event.data.json() : {}; }
     catch (e) { data = { title: 'Arxechat', body: event.data ? event.data.text() : 'Nuevo mensaje' }; }
+    event.waitUntil((async () => {
+    const iconoComp = await iconoFinal(data.icon);
     const options = {
         body: data.body || 'Tienes un mensaje nuevo',
-        icon: data.icon || '/favicon.png',
+        icon: iconoComp,
         badge: '/favicon.png',
         tag: data.tag || 'arxechat-message',
         renotify: true,
@@ -4355,7 +4448,8 @@ self.addEventListener('push', (event) => {
         actions: Array.isArray(data.actions) ? data.actions : [],
         data: { url: data.url || '/', token: data.reply_token || '', chat_id: data.chat_id || '', title: data.title || 'Arxechat', icon: data.icon || '', tag: data.tag || 'arxechat-message' }
     };
-    event.waitUntil(self.registration.showNotification(data.title || 'Arxechat', options));
+    await self.registration.showNotification(data.title || 'Arxechat', options);
+    })());
 });
 self.addEventListener('notificationclick', (event) => {
     const notif = event.notification;
@@ -4376,7 +4470,7 @@ self.addEventListener('notificationclick', (event) => {
             } catch (e) { ok = false; }
             await self.registration.showNotification(d.title || 'Arxechat', {
                 body: ok ? ('Tú: ' + texto) : 'No se pudo enviar tu respuesta. Toca para abrir el chat.',
-                icon: d.icon || '/favicon.png',
+                icon: await iconoFinal(d.icon),
                 badge: '/favicon.png',
                 tag: d.tag || 'arxechat-message',
                 renotify: false,
@@ -4555,6 +4649,9 @@ def icono_chat(tipo, id_, firma):
         lado = min(im.size)
         izq, arr = (im.width - lado) // 2, (im.height - lado) // 2
         im = im.crop((izq, arr, izq + lado, arr + lado)).resize((256, 256))
+        redonda = Image.new('L', (256, 256), 0)
+        ImageDraw.Draw(redonda).ellipse((0, 0, 255, 255), fill=255)
+        im.putalpha(redonda)
         logo = Image.open(io.BytesIO(ARXECHAT_LOGO_BYTES)).convert('RGBA').resize((88, 88))
         mascara = Image.new('L', (88, 88), 0)
         ImageDraw.Draw(mascara).ellipse((0, 0, 87, 87), fill=255)
@@ -4572,7 +4669,10 @@ def icono_chat(tipo, id_, firma):
         return Response(datos, mimetype='image/png', headers=cabeceras)
     except Exception as e:
         # Sin Pillow (o imagen rara): se manda la foto tal cual, sin logo en la esquina.
+        # El service worker la compone (círculo + logo) en el dispositivo, sin necesitar Pillow.
         mime = foto.split(';', 1)[0][5:] or 'image/png'
+        cabeceras['X-Icono'] = 'crudo'
+        cabeceras['Access-Control-Expose-Headers'] = 'X-Icono'
         return Response(crudo, mimetype=mime, headers=cabeceras)
 
 @app.route('/favicon.png')
