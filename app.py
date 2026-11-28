@@ -891,20 +891,6 @@ HTML_LAYOUT = """
         .ed-botones { display: flex; gap: 10px; margin-top: 14px; }
         .ed-botones .btn-action { margin: 0; }
 
-        /* Botones un poco más modernos: misma intensidad y color que antes, sin reflejo.
-           Los de Ajustes se quedan como estaban. */
-        .modal-box:not(.ajustes-box) .btn-action, .modal-box:not(.ajustes-box) button:not(.close-btn):not(.notify-btn),
-        .add-contact-banner, .chat-input-area button.send-btn {
-            font-weight: 600;
-            letter-spacing: 0.01em;
-            transition: transform 0.4s var(--g-muelle), box-shadow 0.25s;
-        }
-        .modal-box:not(.ajustes-box) .btn-action, .modal-box:not(.ajustes-box) button:not(.close-btn):not(.notify-btn) { padding-top: 13px; padding-bottom: 13px; }
-        @media (hover: hover) {
-            .modal-box:not(.ajustes-box) .btn-action:hover, .chat-input-area button.send-btn:hover { transform: translateY(-1px); }
-        }
-        .modal-box:not(.ajustes-box) .btn-action:active, .modal-box:not(.ajustes-box) button:active, .chat-input-area button.send-btn:active { transform: scale(0.95); }
-
         /* Reducir transparencia (solo este dispositivo) */
         body.sin-cristal { --g-bg: rgba(38,52,60,0.98); --g-blur: none; --g-accent: #00876c; --g-shadow: 0 4px 14px rgba(0,0,0,0.3); }
         body.sin-cristal.light-theme { --g-bg: rgba(255,255,255,0.98); --g-accent: #008069; --g-shadow: 0 4px 14px rgba(31,41,55,0.15); }
