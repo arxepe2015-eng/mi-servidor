@@ -562,7 +562,7 @@ HTML_LAYOUT = """
         .file-label { display: block; text-align: left; font-size: 0.85rem; color: var(--text-sub); margin-top: 10px; }
         .modal-box button, .btn-action { width: 100%; padding: 12px; background: var(--accent); border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; margin-top: 10px; font-size: 1rem; }
         .btn-copy { background: var(--bg-header); border: 1px solid var(--accent); color: var(--accent); }
-        .btn-danger { --btn-tint: rgba(234,67,53,0.55); }
+        .btn-danger { background: #ea4335 !important; }
         .auth-toggle { margin-top: 15px; font-size: 0.9rem; color: var(--text-sub); cursor: pointer; padding: 5px; }
         .auth-toggle span { color: var(--accent); text-decoration: underline; }
         .error-msg { color: #ea4335; font-size: 0.85rem; margin-top: 5px; display: none; }
@@ -891,88 +891,23 @@ HTML_LAYOUT = """
         .ed-botones { display: flex; gap: 10px; margin-top: 14px; }
         .ed-botones .btn-action { margin: 0; }
 
-        /* ===== Botones de cristal líquido (estilo gota, como los nuevos de Apple) ===== */
-        :root { --btn-tint: rgba(0,168,132,0.40); --btn-blur: blur(16px) saturate(1.9); }
-        body.light-theme { --btn-tint: rgba(0,150,120,0.55); }
-        .add-btn, .chat-input-area button.send-btn, .add-contact-banner, .member-btn,
-        .modal-box button, .btn-action {
-            position: relative;
-            isolation: isolate;
-            overflow: hidden;
-            background:
-                radial-gradient(130% 100% at 50% -25%, rgba(255,255,255,0.50), rgba(255,255,255,0) 58%),
-                linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0) 55%),
-                var(--btn-tint);
-            -webkit-backdrop-filter: var(--btn-blur);
-            backdrop-filter: var(--btn-blur);
-            border: 1px solid rgba(255,255,255,0.34);
-            box-shadow:
-                0 8px 20px rgba(0,0,0,0.20),
-                0 1px 2px rgba(0,0,0,0.18),
-                inset 0 1.5px 0 rgba(255,255,255,0.75),
-                inset 0 -3px 8px rgba(255,255,255,0.10),
-                inset 0 0 0 0.5px rgba(255,255,255,0.18);
-            color: #fff;
+        /* Botones un poco más modernos: misma intensidad y color que antes, sin reflejo.
+           Los de Ajustes se quedan como estaban. */
+        .modal-box:not(.ajustes-box) .btn-action, .modal-box:not(.ajustes-box) button:not(.close-btn):not(.notify-btn),
+        .add-contact-banner, .chat-input-area button.send-btn {
             font-weight: 600;
             letter-spacing: 0.01em;
-            text-shadow: 0 1px 2px rgba(0,0,0,0.30);
-            transition: transform 0.38s var(--g-muelle), box-shadow 0.25s, filter 0.2s;
+            transition: transform 0.4s var(--g-muelle), box-shadow 0.25s;
         }
-        /* Reflejo curvo de la gota */
-        .add-btn::before, .chat-input-area button.send-btn::before, .add-contact-banner::before, .member-btn::before,
-        .modal-box button:not(.close-btn)::before, .btn-action::before {
-            content: '';
-            position: absolute;
-            left: 10%; right: 10%; top: 3px;
-            height: 40%;
-            border-radius: 999px;
-            background: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.02));
-            pointer-events: none;
-            z-index: -1;
-        }
+        .modal-box:not(.ajustes-box) .btn-action, .modal-box:not(.ajustes-box) button:not(.close-btn):not(.notify-btn) { padding-top: 13px; padding-bottom: 13px; }
         @media (hover: hover) {
-            .add-btn:hover, .chat-input-area button.send-btn:hover, .modal-box button:hover, .btn-action:hover { filter: brightness(1.12) saturate(1.1); transform: translateY(-1px); }
+            .modal-box:not(.ajustes-box) .btn-action:hover, .chat-input-area button.send-btn:hover { transform: translateY(-1px); }
         }
-        .add-btn:active, .chat-input-area button.send-btn:active, .modal-box button:active, .btn-action:active {
-            transform: scale(0.94);
-            filter: brightness(0.95);
-        }
-        /* Secundarios: cristal claro con texto de color */
-        .btn-sec, .btn-copy, .modal-box .aj-btn-sec {
-            --btn-tint: rgba(255,255,255,0.10);
-            color: var(--accent) !important;
-            text-shadow: none;
-            border: 1px solid var(--g-border) !important;
-        }
-        body.light-theme .btn-sec, body.light-theme .btn-copy, body.light-theme .modal-box .aj-btn-sec { --btn-tint: rgba(255,255,255,0.55); }
-        /* Elementos que no deben llevar la gota completa */
-        .modal-box .aj-nav button::before, .modal-box .notify-btn::before, .message-context-menu button::before { display: none; }
-        .modal-box .aj-nav button { font-weight: 500; text-shadow: none; overflow: visible; }
-        .modal-box .aj-nav button.activo {
-            background: radial-gradient(130% 100% at 50% -25%, rgba(255,255,255,0.35), rgba(255,255,255,0) 60%), var(--g-bg);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.14), inset 0 1.5px 0 var(--g-hi);
-        }
-        .message-context-menu button { text-shadow: none; overflow: visible; }
-        /* Botones redondos (adjuntar, stickers, notificaciones, menú) */
-        .attach-btn, .notify-btn {
-            background:
-                radial-gradient(130% 100% at 50% -25%, rgba(255,255,255,0.40), rgba(255,255,255,0) 58%),
-                var(--g-bg);
-            box-shadow: 0 6px 16px rgba(0,0,0,0.18), inset 0 1.5px 0 var(--g-hi), inset 0 -3px 8px rgba(255,255,255,0.06);
-        }
-        @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-            :root { --btn-tint: rgba(0,140,112,0.88); }
-        }
-        @media (prefers-reduced-transparency: reduce) {
-            :root { --btn-tint: rgba(0,140,112,0.92); }
-        }
+        .modal-box:not(.ajustes-box) .btn-action:active, .modal-box:not(.ajustes-box) button:active, .chat-input-area button.send-btn:active { transform: scale(0.95); }
 
         /* Reducir transparencia (solo este dispositivo) */
         body.sin-cristal { --g-bg: rgba(38,52,60,0.98); --g-blur: none; --g-accent: #00876c; --g-shadow: 0 4px 14px rgba(0,0,0,0.3); }
         body.sin-cristal.light-theme { --g-bg: rgba(255,255,255,0.98); --g-accent: #008069; --g-shadow: 0 4px 14px rgba(31,41,55,0.15); }
-        body.sin-cristal { --btn-tint: #00876c; --btn-blur: none; }
-        body.sin-cristal.light-theme { --btn-tint: #008069; }
-        body.sin-cristal .btn-sec, body.sin-cristal .btn-copy, body.sin-cristal .modal-box .aj-btn-sec { --btn-tint: var(--g-bg); }
         body.sin-cristal .modal-overlay { -webkit-backdrop-filter: none; backdrop-filter: none; background: rgba(0,0,0,0.55); }
         body.sin-cristal .sidebar, body.sin-cristal .chat-area { background: var(--bg-card); }
         body.sin-cristal .chat-area { background: var(--bg-body); }
@@ -1012,7 +947,7 @@ HTML_LAYOUT = """
             <input type="text" id="compartirFiltro" placeholder="Buscar chat o grupo" oninput="pintarListaCompartir()">
             <div id="compartirLista" style="max-height: 38vh; overflow-y: auto; margin-top: 4px;"></div>
             <button type="button" class="btn-action" id="compartirEnviarBtn" onclick="enviarCompartido()">Enviar</button>
-            <button type="button" class="btn-action btn-sec" onclick="cerrarCompartir()">Cancelar</button>
+            <button type="button" class="btn-action" style="background: #202c33; border: 1px solid var(--accent); color: var(--accent);" onclick="cerrarCompartir()">Cancelar</button>
         </div>
     </div>
 
@@ -1041,7 +976,7 @@ HTML_LAYOUT = """
             <span class="close-btn" onclick="cerrarModalChoice()">&times;</span>
             <h2>¿Qué deseas añadir?</h2>
             <button type="button" class="btn-action" onclick="abrirModalPersona()">Añadir Persona</button>
-            <button type="button" class="btn-action btn-sec" onclick="abrirModalGrupo()">Crear Grupo</button>
+            <button type="button" class="btn-action" style="background: #202c33; border: 1px solid var(--accent); color: var(--accent);" onclick="abrirModalGrupo()">Crear Grupo</button>
         </div>
     </div>
 
