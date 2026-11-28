@@ -312,6 +312,15 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_push_subscriptions_usuario ON push_subscriptions (usuario_id)")
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS alias_contactos (
+            mi_id TEXT NOT NULL,
+            contacto_id TEXT NOT NULL,
+            modo TEXT NOT NULL,
+            alias TEXT,
+            PRIMARY KEY (mi_id, contacto_id)
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS stickers (
             id SERIAL PRIMARY KEY,
             usuario_id TEXT NOT NULL,
@@ -851,6 +860,8 @@ HTML_LAYOUT = """
             .chat-input-area button.send-btn { padding: 11px 12px; flex-shrink: 0; }
             .chat-input-area { gap: 6px; padding-left: 8px; padding-right: 8px; }
         }
+        .visual-activo { outline: 2px solid var(--accent); }
+        #visualAlias { width: 100%; box-sizing: border-box; margin: 6px 0 10px; }
         .stickers-box { max-width: 420px; width: 94%; }
         .stk-nota { font-size: 0.8rem; color: var(--text-sub); margin-bottom: 8px; }
         .stk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; max-height: 46vh; overflow-y: auto; padding: 4px; margin-bottom: 10px; }
@@ -1023,8 +1034,20 @@ HTML_LAYOUT = """
             <span class="close-btn" onclick="cerrarOpcionesContacto()">&times;</span>
             <h2>Opciones</h2>
             <div class="info-contacto" id="infoContacto"></div>
+            <button type="button" class="btn-action" onclick="abrirVisualizacion()">Nombre de visualización</button>
             <button type="button" class="btn-action" onclick="confirmarVaciarConversacion()">Vaciar conversación</button>
             <button type="button" class="btn-action btn-danger" onclick="confirmarEliminarContacto()">Eliminar contacto</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="visualModal" style="display:none;z-index:1100;" onclick="if(event.target===this)cerrarVisualizacion()">
+        <div class="modal-box">
+            <span class="close-btn" onclick="cerrarVisualizacion()">&times;</span>
+            <h2>Nombre de visualización</h2>
+            <div class="stk-nota">Cómo quieres ver a esta persona. Solo cambia para ti.</div>
+            <div id="visualOpciones"></div>
+            <input type="text" id="visualAlias" placeholder="Ej: Hermano" maxlength="40" style="display:none;">
+            <button type="button" class="btn-action" onclick="guardarVisualizacion()">Guardar</button>
         </div>
     </div>
 
@@ -2033,7 +2056,7 @@ HTML_LAYOUT = """
             } else {
                 const ic = document.getElementById('infoContacto');
                 ic.textContent = '';
-                [['Nombre', contactoActivo.nombre], ['Nombre clave', contactoActivo.nombre_clave], ['ID', contactoActivo.id]].forEach(([et, val]) => {
+                [['Nombre', contactoActivo.nombre_real || contactoActivo.nombre], ['Nombre clave', contactoActivo.nombre_clave], ['ID', contactoActivo.id]].forEach(([et, val]) => {
                     if (!val) return;
                     const f = document.createElement('div');
                     f.className = 'info-contacto-fila';
@@ -2045,6 +2068,43 @@ HTML_LAYOUT = """
                 document.getElementById('contactOptionsModal').style.display = 'flex';
             }
         }
+
+        let visualModo = 'defecto';
+        function abrirVisualizacion() {
+            if (!contactoActivo || contactoActivo.esGrupo) return;
+            visualModo = contactoActivo.visualizacion || 'defecto';
+            document.getElementById('visualAlias').value = contactoActivo.alias || '';
+            pintarVisualizacion();
+            cerrarOpcionesContacto();
+            document.getElementById('visualModal').style.display = 'flex';
+        }
+        function pintarVisualizacion() {
+            const c = contactoActivo;
+            const cont = document.getElementById('visualOpciones');
+            cont.textContent = '';
+            [['defecto', 'Por defecto: ' + (c.nombre_real || c.nombre)],
+             ['clave', 'Nombre clave: ' + (c.nombre_clave || c.nombre_real || c.nombre)],
+             ['otro', 'Otro (lo escribo yo)']].forEach(([m, texto]) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'btn-action' + (visualModo === m ? ' visual-activo' : '');
+                b.textContent = (visualModo === m ? '✓ ' : '') + texto;
+                b.onclick = () => { visualModo = m; pintarVisualizacion(); };
+                cont.appendChild(b);
+            });
+            const inp = document.getElementById('visualAlias');
+            inp.style.display = visualModo === 'otro' ? 'block' : 'none';
+            if (visualModo === 'otro') inp.focus();
+        }
+        function cerrarVisualizacion() { document.getElementById('visualModal').style.display = 'none'; }
+        function guardarVisualizacion() {
+            if (!contactoActivo || !miUsuario) return;
+            const alias = document.getElementById('visualAlias').value.trim();
+            if (visualModo === 'otro' && !alias) { alert('Escribe el nombre que quieres ver.'); return; }
+            socket.emit('establecer_visualizacion', { usuario_id: miUsuario.id, contacto_id: contactoActivo.id, modo: visualModo, alias: alias });
+            cerrarVisualizacion();
+        }
+        socket.on('visualizacion_error', (r) => alert((r && r.mensaje) || 'No se pudo guardar.'));
 
         function cerrarOpcionesContacto() {
             document.getElementById('contactOptionsModal').style.display = 'none';
@@ -2825,7 +2885,14 @@ HTML_LAYOUT = """
             lista.forEach((c, i) => { c._base = i; if (c.foto) cacheFotosUsuario[c.id] = c.foto; });
             if (contactoActivo) {
                 const nuevo = lista.find(x => x.id === contactoActivo.id);
-                if (nuevo) { contactoActivo.insignia = !!nuevo.insignia; actualizarCabeceraNombre(); }
+                if (nuevo) {
+                    contactoActivo.insignia = !!nuevo.insignia;
+                    contactoActivo.nombre = nuevo.nombre;
+                    contactoActivo.nombre_real = nuevo.nombre_real;
+                    contactoActivo.visualizacion = nuevo.visualizacion;
+                    contactoActivo.alias = nuevo.alias;
+                    actualizarCabeceraNombre();
+                }
             }
             contactosDelServidor = true;
             renderizarContactos();
@@ -3045,6 +3112,11 @@ HTML_LAYOUT = """
         function cerrarInsignia() {
             document.getElementById('insigniaModal').style.display = 'none';
         }
+        function nombreVisibleDe(id, porDefecto) {
+            const c = (misContactos || []).find(x => !x.esGrupo && x.id === id);
+            return c && c.visualizacion && c.visualizacion !== 'defecto' ? c.nombre : porDefecto;
+        }
+
         function actualizarCabeceraNombre() {
             const el = document.getElementById('activeName');
             if (!el || !contactoActivo) return;
@@ -3391,7 +3463,7 @@ HTML_LAYOUT = """
 
             let senderHeader = '';
             if(!esMio && contactoActivo.esGrupo) {
-                senderHeader = `<span class="sender-name">${msg.nombreemisor || msg.nombreEmisor || 'Usuario'}</span>`;
+                senderHeader = `<span class="sender-name">${escHtmlCompartir(nombreVisibleDe(msg.emisor, msg.nombreemisor || msg.nombreEmisor || 'Usuario'))}</span>`;
             }
 
             const reenviadoDe = msg.reenviado_de ?? msg.reenviadoDe;
@@ -5609,9 +5681,51 @@ def _construir_lista_contactos(mi_id):
     for entrada in lista:
         entrada['orden'] = posiciones.get(entrada['id'])
 
+    # "Nombre de visualización": cómo quiere ver el usuario a cada persona (solo para él).
+    cursor.execute("SELECT contacto_id, modo, alias FROM alias_contactos WHERE mi_id = %s", (mi_id,))
+    alias_map = {r['contacto_id']: r for r in cursor.fetchall()}
     cursor.close()
     conn.close()
+    for it in lista:
+        if it.get('esGrupo'):
+            continue
+        it['nombre_real'] = it.get('nombre')
+        a = alias_map.get(it['id'])
+        modo = a['modo'] if a else 'defecto'
+        it['visualizacion'] = modo
+        it['alias'] = a['alias'] if a and modo == 'otro' else None
+        if modo == 'clave' and it.get('nombre_clave'):
+            it['nombre'] = it['nombre_clave']
+        elif modo == 'otro' and a and a['alias']:
+            it['nombre'] = a['alias']
     return lista
+
+@socketio.on('establecer_visualizacion')
+def establecer_visualizacion(data):
+    uid = (data or {}).get('usuario_id')
+    cid = (data or {}).get('contacto_id')
+    modo = (data or {}).get('modo')
+    alias = str((data or {}).get('alias') or '').strip()[:40]
+    if not uid or not cid or sid_a_usuario.get(request.sid) != uid or modo not in ('defecto', 'clave', 'otro'):
+        return
+    if modo == 'otro' and not alias:
+        emit('visualizacion_error', {'mensaje': 'Escribe el nombre que quieres ver.'})
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        if modo == 'defecto':
+            cursor.execute("DELETE FROM alias_contactos WHERE mi_id = %s AND contacto_id = %s", (uid, cid))
+        else:
+            cursor.execute("""
+                INSERT INTO alias_contactos (mi_id, contacto_id, modo, alias) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (mi_id, contacto_id) DO UPDATE SET modo = EXCLUDED.modo, alias = EXCLUDED.alias
+            """, (uid, cid, modo, alias if modo == 'otro' else None))
+        conn.commit()
+        cursor.close()
+    finally:
+        conn.close()
+    socketio.emit('contactos_cargados', _construir_lista_contactos(uid), room=uid)
 
 _cache_nombres_usuario = {}
 def _nombre_de_usuario(uid):
